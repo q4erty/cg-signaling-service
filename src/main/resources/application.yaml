@@ -1,3 +1,15 @@
 spring:
   application:
     name: signaling-service
+
+worker:
+  base-url: "http://localhost:9090"
+  ready-timeout: 3s
+  sdp-timeout: 20s
+  call-executor-pool-size: 8
+  connect-timeout: 5s
+  sdp-read-timeout-slack: 30s
+
+logging:
+  level:
+    com.cloudgaming.signaling: DEBUG
