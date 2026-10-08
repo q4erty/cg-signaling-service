@@ -10,6 +10,9 @@ worker:
   connect-timeout: 5s
   sdp-read-timeout-slack: 30s
 
+websocket:
+  allowed-origins: []
+
 logging:
   level:
-    com.cloudgaming.signaling: DEBUG
+    com.cloudgaming.signalingservice: DEBUG

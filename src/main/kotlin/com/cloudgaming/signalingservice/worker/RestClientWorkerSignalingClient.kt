@@ -7,6 +7,7 @@ import org.springframework.http.HttpStatus
 import org.springframework.http.HttpStatusCode
 import org.springframework.http.MediaType
 import org.springframework.http.client.JdkClientHttpRequestFactory
+import jakarta.annotation.PreDestroy
 import org.springframework.stereotype.Component
 import org.springframework.web.client.RestClient
 import org.springframework.web.client.RestClientException
@@ -14,8 +15,12 @@ import java.net.http.HttpClient
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicLong
 
 private data class OfferRequestBody(val sdp: String, val type: String = "offer")
 
@@ -36,16 +41,33 @@ class RestClientWorkerSignalingClient(
 
     private val log = LoggerFactory.getLogger(RestClientWorkerSignalingClient::class.java)
 
-    private val readyClient: RestClient = buildClient(workerProperties.readyTimeout)
+    private val readyClient: RestClient = buildClient(
+        responseTimeout = workerProperties.readyTimeout,
+        connectionTimeout = workerProperties.readyTimeout,
+    )
 
     /** Read-timeout больше sdpTimeout: JDK HttpClient не кидает HttpTimeoutException
      *  при таймауте чтения тела (JDK-8208693) — реальный дедлайн см. future.get() ниже. */
-    private val sdpClient: RestClient =
-        buildClient(workerProperties.sdpTimeout.plus(workerProperties.sdpReadTimeoutSlack))
+    private val sdpClient: RestClient = buildClient(
+        responseTimeout = workerProperties.sdpTimeout.plus(workerProperties.sdpReadTimeoutSlack),
+        connectionTimeout = workerProperties.connectTimeout,
+    )
 
-    private fun buildClient(responseTimeout: Duration): RestClient {
+    private val sdpExecutor: ExecutorService = Executors.newFixedThreadPool(
+        Runtime.getRuntime().availableProcessors(),
+        object : ThreadFactory {
+            private val counter = AtomicLong(0)
+            override fun newThread(r: Runnable): Thread {
+                val t = Thread(r, "sdp-worker-${counter.incrementAndGet()}")
+                t.isDaemon = true
+                return t
+            }
+        },
+    )
+
+    private fun buildClient(responseTimeout: Duration, connectionTimeout: Duration): RestClient {
         val httpClient = HttpClient.newBuilder()
-            .connectTimeout(workerProperties.connectTimeout)
+            .connectTimeout(connectionTimeout)
             .build()
         val requestFactory = JdkClientHttpRequestFactory(httpClient).apply {
             setReadTimeout(responseTimeout)
@@ -73,7 +95,7 @@ class RestClientWorkerSignalingClient(
     override fun exchangeSdp(workerBaseUrl: String, offerSdp: String): SdpAnswer {
         val requestBody = objectMapper.writeValueAsString(OfferRequestBody(sdp = offerSdp))
 
-        val future = CompletableFuture.supplyAsync {
+        val future = CompletableFuture.supplyAsync({
             sdpClient.post()
                 .uri("$workerBaseUrl${WorkerApi.SDP_PATH}")
                 .contentType(MediaType.APPLICATION_JSON)
@@ -85,7 +107,7 @@ class RestClientWorkerSignalingClient(
                 }
                 .body(String::class.java)
                 ?: throw WorkerProtocolException(workerBaseUrl, "empty response body")
-        }
+        }, sdpExecutor)
 
         val responseBody: String
         try {
@@ -137,4 +159,9 @@ class RestClientWorkerSignalingClient(
         } catch (e: Exception) {
             rawBody
         }
+
+    @PreDestroy
+    fun shutdown() {
+        sdpExecutor.shutdown()
+    }
 }

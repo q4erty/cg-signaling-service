@@ -4,7 +4,9 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.scheduling.concurrent.CustomizableThreadFactory
 import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 @Configuration
 class ExecutorConfig(
@@ -12,9 +14,12 @@ class ExecutorConfig(
 ) {
 
     @Bean(destroyMethod = "shutdown")
-    fun workerCallExecutor(): ExecutorService =
-        Executors.newFixedThreadPool(
-            workerProperties.callExecutorPoolSize,
-            CustomizableThreadFactory("worker-call-"),
-        )
+    fun workerCallExecutor(): ExecutorService = ThreadPoolExecutor(
+        workerProperties.callExecutorPoolSize,
+        workerProperties.callExecutorPoolSize,
+        0L,
+        TimeUnit.MILLISECONDS,
+        SynchronousQueue(),
+        CustomizableThreadFactory("worker-call-"),
+    )
 }

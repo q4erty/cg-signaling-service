@@ -6,5 +6,6 @@ enum class ErrorCode {
     WORKER_TIMEOUT,
     WORKER_UNREACHABLE,
     WORKER_REJECTED_OFFER,
+    OVERLOAD,
     INTERNAL_ERROR,
 }

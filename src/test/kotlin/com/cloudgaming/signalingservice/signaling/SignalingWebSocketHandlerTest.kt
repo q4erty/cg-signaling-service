@@ -123,11 +123,12 @@ class SignalingWebSocketHandlerTest {
     @Test
     fun `closing the session forgets it, so a stray message after close is not sent anywhere`() {
         handler.afterConnectionClosed(session, org.springframework.web.socket.CloseStatus.NORMAL)
+        every { session.isOpen } returns false
         every { workerSignalingClient.isReady(any()) } returns true
         every { workerSignalingClient.exchangeSdp(any(), any()) } returns SdpAnswer(sdp = "v=0...answer")
 
         handler.handleTextMessage(session, TextMessage("""{"type": "offer", "sdp": "v=0...offer"}"""))
 
-        assertThat(sentMessage.isCaptured).isTrue()
+        assertThat(sentMessage.isCaptured).isFalse()
     }
 }

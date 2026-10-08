@@ -71,32 +71,37 @@ class SignalingWebSocketHandler(
         val sessionId = session.id
         val workerBaseUrl = resolveWorkerBaseUrl()
 
-        workerCallExecutor.execute {
-            try {
-                if (!workerSignalingClient.isReady(workerBaseUrl)) {
-                    log.info("WS {}: worker {} not ready yet", sessionId, workerBaseUrl)
-                    send(session, ServerMessage.Error(ErrorCode.WORKER_NOT_READY, "Worker is not ready yet"))
-                    return@execute
-                }
+        try {
+            workerCallExecutor.execute {
+                try {
+                    if (!workerSignalingClient.isReady(workerBaseUrl)) {
+                        log.info("WS {}: worker {} not ready yet", sessionId, workerBaseUrl)
+                        send(session, ServerMessage.Error(ErrorCode.WORKER_NOT_READY, "Worker is not ready yet"))
+                        return@execute
+                    }
 
-                val answer = workerSignalingClient.exchangeSdp(workerBaseUrl, offer.sdp)
-                send(session, ServerMessage.Answer(sdp = answer.sdp))
-            } catch (e: WorkerTimeoutException) {
-                log.warn("WS {}: {}", sessionId, e.message)
-                send(session, ServerMessage.Error(ErrorCode.WORKER_TIMEOUT, e.message ?: "Worker timed out"))
-            } catch (e: WorkerUnreachableException) {
-                log.warn("WS {}: {}", sessionId, e.message)
-                send(session, ServerMessage.Error(ErrorCode.WORKER_UNREACHABLE, e.message ?: "Worker unreachable"))
-            } catch (e: WorkerRejectedOfferException) {
-                log.info("WS {}: worker rejected offer: {}", sessionId, e.workerMessage)
-                send(session, ServerMessage.Error(ErrorCode.WORKER_REJECTED_OFFER, e.workerMessage))
-            } catch (e: WorkerProtocolException) {
-                log.error("WS {}: unexpected worker protocol error", sessionId, e)
-                send(session, ServerMessage.Error(ErrorCode.INTERNAL_ERROR, "Unexpected error talking to the worker"))
-            } catch (e: Exception) {
-                log.error("WS {}: unexpected error handling offer", sessionId, e)
-                send(session, ServerMessage.Error(ErrorCode.INTERNAL_ERROR, "Unexpected server error"))
+                    val answer = workerSignalingClient.exchangeSdp(workerBaseUrl, offer.sdp)
+                    send(session, ServerMessage.Answer(sdp = answer.sdp))
+                } catch (e: WorkerTimeoutException) {
+                    log.warn("WS {}: {}", sessionId, e.message)
+                    send(session, ServerMessage.Error(ErrorCode.WORKER_TIMEOUT, e.message ?: "Worker timed out"))
+                } catch (e: WorkerUnreachableException) {
+                    log.warn("WS {}: {}", sessionId, e.message)
+                    send(session, ServerMessage.Error(ErrorCode.WORKER_UNREACHABLE, e.message ?: "Worker unreachable"))
+                } catch (e: WorkerRejectedOfferException) {
+                    log.info("WS {}: worker rejected offer: {}", sessionId, e.workerMessage)
+                    send(session, ServerMessage.Error(ErrorCode.WORKER_REJECTED_OFFER, e.workerMessage))
+                } catch (e: WorkerProtocolException) {
+                    log.error("WS {}: unexpected worker protocol error", sessionId, e)
+                    send(session, ServerMessage.Error(ErrorCode.INTERNAL_ERROR, "Unexpected error talking to the worker"))
+                } catch (e: Exception) {
+                    log.error("WS {}: unexpected error handling offer", sessionId, e)
+                    send(session, ServerMessage.Error(ErrorCode.INTERNAL_ERROR, "Unexpected server error"))
+                }
             }
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            log.warn("WS {}: worker pool exhausted, sending overload response", sessionId)
+            send(session, ServerMessage.Error(ErrorCode.OVERLOAD, "Server overloaded, try again later"))
         }
     }
 

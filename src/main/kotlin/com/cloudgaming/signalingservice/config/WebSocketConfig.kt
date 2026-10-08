@@ -10,11 +10,13 @@ import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry
 @EnableWebSocket
 class WebSocketConfig(
     private val signalingWebSocketHandler: SignalingWebSocketHandler,
+    private val webSocketProperties: WebSocketProperties,
 ) : WebSocketConfigurer {
 
     override fun registerWebSocketHandlers(registry: WebSocketHandlerRegistry) {
+        val allowedOrigins = webSocketProperties.allowedOrigins.toTypedArray()
         registry
             .addHandler(signalingWebSocketHandler, "/api/v1/signaling")
-            .setAllowedOrigins("*") // временно, сузить до прод-доменов
+            .setAllowedOrigins(*allowedOrigins)
     }
 }
