@@ -20,7 +20,7 @@ class RoomRegistrationService(
     private val devTtl: Duration? = if (devTtlRaw.isNullOrBlank()) {
         null
     } else {
-        try {
+        val parsed = try {
             Duration.parse(devTtlRaw)
         } catch (e: Exception) {
             throw IllegalStateException(
@@ -28,6 +28,13 @@ class RoomRegistrationService(
                 e,
             )
         }
+        require(!parsed.isNegative && !parsed.isZero) {
+            "rooms.dev-ttl must be positive, got: $parsed"
+        }
+        require(parsed.seconds >= 1) {
+            "rooms.dev-ttl must be at least 1 second to avoid immediate key expiration, got: $parsed"
+        }
+        parsed
     }
 
     companion object {
@@ -48,6 +55,8 @@ class RoomRegistrationService(
                 'created_at', ARGV[4])
             if ARGV[5] ~= '' then
                 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[5]))
+            else
+                redis.call('PERSIST', KEYS[1])
             end
             return exists
         """
