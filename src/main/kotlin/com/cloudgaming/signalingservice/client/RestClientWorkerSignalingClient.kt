@@ -1,6 +1,10 @@
-package com.cloudgaming.signalingservice.worker
+package com.cloudgaming.signalingservice.client
 
 import com.cloudgaming.signalingservice.config.WorkerProperties
+import com.cloudgaming.signalingservice.exception.WorkerProtocolException
+import com.cloudgaming.signalingservice.exception.WorkerRejectedOfferException
+import com.cloudgaming.signalingservice.exception.WorkerTimeoutException
+import com.cloudgaming.signalingservice.exception.WorkerUnreachableException
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
@@ -11,7 +15,10 @@ import jakarta.annotation.PreDestroy
 import org.springframework.stereotype.Component
 import org.springframework.web.client.RestClient
 import org.springframework.web.client.RestClientException
+import java.io.IOException
+import java.net.SocketTimeoutException
 import java.net.http.HttpClient
+import java.net.http.HttpTimeoutException
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
@@ -125,7 +132,7 @@ class RestClientWorkerSignalingClient(
                     }
                     throw WorkerUnreachableException(workerBaseUrl, cause)
                 }
-                is java.io.IOException -> {
+                is IOException -> {
                     if (cause.hasTimeoutCause()) {
                         throw WorkerTimeoutException(workerBaseUrl, cause)
                     }
@@ -145,7 +152,7 @@ class RestClientWorkerSignalingClient(
     private fun Throwable.hasTimeoutCause(): Boolean {
         var current: Throwable? = this
         while (current != null) {
-            if (current is java.net.http.HttpTimeoutException || current is java.net.SocketTimeoutException) {
+            if (current is HttpTimeoutException || current is SocketTimeoutException) {
                 return true
             }
             current = current.cause

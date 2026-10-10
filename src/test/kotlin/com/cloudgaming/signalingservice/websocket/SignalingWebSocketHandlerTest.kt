@@ -1,10 +1,9 @@
-package com.cloudgaming.signalingservice.signaling
+package com.cloudgaming.signalingservice.websocket
 
-import com.cloudgaming.signalingservice.config.WorkerProperties
 import com.cloudgaming.signalingservice.dto.ErrorCode
-import com.cloudgaming.signalingservice.worker.SdpAnswer
-import com.cloudgaming.signalingservice.worker.WorkerSignalingClient
-import com.cloudgaming.signalingservice.worker.WorkerTimeoutException
+import com.cloudgaming.signalingservice.client.SdpAnswer
+import com.cloudgaming.signalingservice.client.WorkerSignalingClient
+import com.cloudgaming.signalingservice.exception.WorkerTimeoutException
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import io.mockk.CapturingSlot
 import io.mockk.every
@@ -33,7 +32,7 @@ class SignalingWebSocketHandlerTest {
 
     private val workerSignalingClient = mockk<WorkerSignalingClient>()
     private val objectMapper = jacksonObjectMapper()
-    private val workerProperties = WorkerProperties(baseUrl = "http://worker.local:9090")
+    private val workerBaseUrl = "http://worker.local:9090"
 
     private lateinit var handler: SignalingWebSocketHandler
     private lateinit var session: WebSocketSession
@@ -43,7 +42,6 @@ class SignalingWebSocketHandlerTest {
     fun setUp() {
         handler = SignalingWebSocketHandler(
             workerSignalingClient = workerSignalingClient,
-            workerProperties = workerProperties,
             objectMapper = objectMapper,
             workerCallExecutor = DirectExecutorService(),
         )
@@ -51,6 +49,10 @@ class SignalingWebSocketHandlerTest {
         session = mockk(relaxed = true)
         every { session.id } returns "test-session-1"
         every { session.isOpen } returns true
+        every { session.attributes } returns mutableMapOf(
+            SignalingHandshakeInterceptor.ATTR_WORKER_BASE_URL to workerBaseUrl
+        )
+
         sentMessage = slot()
         every { session.sendMessage(capture(sentMessage)) } returns Unit
 
@@ -61,9 +63,9 @@ class SignalingWebSocketHandlerTest {
 
     @Test
     fun `offer that the worker accepts results in an answer message`() {
-        every { workerSignalingClient.isReady("http://worker.local:9090") } returns true
-        every { workerSignalingClient.exchangeSdp("http://worker.local:9090", "v=0...offer") } returns
-            SdpAnswer(sdp = "v=0...answer")
+        every { workerSignalingClient.isReady(workerBaseUrl) } returns true
+        every { workerSignalingClient.exchangeSdp(workerBaseUrl, "v=0...offer") } returns
+                SdpAnswer(sdp = "v=0...answer")
 
         handler.handleTextMessage(session, TextMessage("""{"type": "offer", "sdp": "v=0...offer"}"""))
 
@@ -74,7 +76,7 @@ class SignalingWebSocketHandlerTest {
 
     @Test
     fun `offer while the worker is not ready results in WORKER_NOT_READY, exchangeSdp never called`() {
-        every { workerSignalingClient.isReady("http://worker.local:9090") } returns false
+        every { workerSignalingClient.isReady(workerBaseUrl) } returns false
 
         handler.handleTextMessage(session, TextMessage("""{"type": "offer", "sdp": "v=0...offer"}"""))
 
@@ -88,7 +90,7 @@ class SignalingWebSocketHandlerTest {
     fun `a worker timeout is surfaced as WORKER_TIMEOUT`() {
         every { workerSignalingClient.isReady(any()) } returns true
         every { workerSignalingClient.exchangeSdp(any(), any()) } throws
-            WorkerTimeoutException("http://worker.local:9090")
+                WorkerTimeoutException(workerBaseUrl)
 
         handler.handleTextMessage(session, TextMessage("""{"type": "offer", "sdp": "v=0...offer"}"""))
 
@@ -130,5 +132,19 @@ class SignalingWebSocketHandlerTest {
         handler.handleTextMessage(session, TextMessage("""{"type": "offer", "sdp": "v=0...offer"}"""))
 
         assertThat(sentMessage.isCaptured).isFalse()
+    }
+
+    @Test
+    fun `missing workerBaseUrl in session attributes closes session with SERVER_ERROR`() {
+        val sessionWithoutWorker = mockk<WebSocketSession>(relaxed = true)
+        every { sessionWithoutWorker.id } returns "session-without-worker"
+        every { sessionWithoutWorker.isOpen } returns true
+        every { sessionWithoutWorker.attributes } returns mutableMapOf()
+
+        handler.handleTextMessage(sessionWithoutWorker, TextMessage("""{"type": "offer", "sdp": "v=0...offer"}"""))
+
+        verify { sessionWithoutWorker.close(org.springframework.web.socket.CloseStatus.SERVER_ERROR) }
+        verify(exactly = 0) { workerSignalingClient.isReady(any()) }
+        verify(exactly = 0) { workerSignalingClient.exchangeSdp(any(), any()) }
     }
 }

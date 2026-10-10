@@ -1,18 +1,31 @@
 spring:
   application:
     name: signaling-service
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
 
-worker:
-  base-url: "http://localhost:9090"
-  ready-timeout: 3s
-  sdp-timeout: 20s
-  call-executor-pool-size: 8
-  connect-timeout: 5s
-  sdp-read-timeout-slack: 30s
+server:
+  port: ${SERVER_PORT:8080}
 
 websocket:
-  allowed-origins: []
+  allowed-origins: ${WEBSOCKET_ALLOWED_ORIGINS:http://localhost:3000}
+
+worker:
+  ready-timeout: ${WORKER_READY_TIMEOUT:3s}
+  connect-timeout: ${WORKER_CONNECT_TIMEOUT:3s}
+  sdp-timeout: ${WORKER_SDP_TIMEOUT:20s}
+  sdp-read-timeout-slack: ${WORKER_SDP_READ_TIMEOUT_SLACK:5s}
+  call-executor-pool-size: ${WORKER_CALL_EXECUTOR_POOL_SIZE:100}
+
+rooms:
+  dev-ttl: ${ROOMS_DEV_TTL:}
+
+internal:
+  secret: ${INTERNAL_SECRET:}
 
 logging:
   level:
-    com.cloudgaming.signalingservice: DEBUG
+    com.cloudgaming.signalingservice: ${LOG_LEVEL:INFO}
+    org.springframework.web.socket: ${LOG_LEVEL_WEBSOCKET:INFO}

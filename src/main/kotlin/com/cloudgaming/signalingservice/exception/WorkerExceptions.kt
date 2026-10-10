@@ -1,4 +1,4 @@
-package com.cloudgaming.signalingservice.worker
+package com.cloudgaming.signalingservice.exception
 
 sealed class WorkerSignalingException(message: String, cause: Throwable? = null) :
     RuntimeException(message, cause)
