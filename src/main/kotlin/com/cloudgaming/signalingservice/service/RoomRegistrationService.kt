@@ -1,10 +1,11 @@
-package com.cloudgaming.signalingservice.controller
+package com.cloudgaming.signalingservice.service
 
 import com.cloudgaming.signalingservice.model.Room
 import com.cloudgaming.signalingservice.model.RoomId
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.data.redis.core.StringRedisTemplate
+import org.springframework.data.redis.core.script.RedisScript
 import org.springframework.stereotype.Service
 import java.time.Duration
 import java.time.Instant
@@ -12,10 +13,22 @@ import java.time.Instant
 @Service
 class RoomRegistrationService(
     private val redisTemplate: StringRedisTemplate,
-    @Value("\${rooms.dev-ttl:}") private val devTtl: String?,
+    @Value("\${rooms.dev-ttl:}") devTtlRaw: String?,
 ) {
-
     private val log = LoggerFactory.getLogger(RoomRegistrationService::class.java)
+
+    private val devTtl: Duration? = if (devTtlRaw.isNullOrBlank()) {
+        null
+    } else {
+        try {
+            Duration.parse(devTtlRaw)
+        } catch (e: Exception) {
+            throw IllegalStateException(
+                "Invalid rooms.dev-ttl value: '$devTtlRaw'. Must be ISO-8601 duration (e.g. PT1H)",
+                e,
+            )
+        }
+    }
 
     companion object {
         private const val KEY_PREFIX = "room:"
@@ -24,42 +37,56 @@ class RoomRegistrationService(
         private const val FIELD_GAME_ID = "game_id"
         private const val FIELD_STATUS = "status"
         private const val FIELD_CREATED_AT = "created_at"
+
+        private const val REGISTER_SCRIPT = """
+            local exists = redis.call('EXISTS', KEYS[1])
+            redis.call('HSET', KEYS[1],
+                'worker_ip', ARGV[1],
+                'webrtc_port', ARGV[2],
+                'game_id', ARGV[3],
+                'status', 'ACTIVE',
+                'created_at', ARGV[4])
+            if ARGV[5] ~= '' then
+                redis.call('EXPIRE', KEYS[1], tonumber(ARGV[5]))
+            end
+            return exists
+        """
     }
+
+    private val script = RedisScript.of(REGISTER_SCRIPT.trimIndent(), Long::class.java)
 
     fun register(roomId: RoomId, workerIp: String, webrtcPort: Int, gameId: String): Boolean {
         if (!Room.validateWorkerIp(workerIp)) {
             throw IllegalArgumentException("Invalid worker_ip: '$workerIp'")
         }
-
         if (!Room.validatePort(webrtcPort)) {
             throw IllegalArgumentException("Invalid webrtc_port: $webrtcPort")
         }
-
         if (gameId.isBlank()) {
             throw IllegalArgumentException("gameId is blank")
         }
 
         val key = "$KEY_PREFIX${roomId.value}"
-        val existingKey = redisTemplate.hasKey(key)
+        val ttlSeconds = devTtl?.seconds?.toString() ?: ""
 
-        val entries = mapOf(
-            FIELD_WORKER_IP to workerIp,
-            FIELD_WEBRTC_PORT to webrtcPort.toString(),
-            FIELD_GAME_ID to gameId,
-            FIELD_STATUS to "ACTIVE",
-            FIELD_CREATED_AT to Instant.now().toString(),
+        val existed = redisTemplate.execute(
+            script,
+            listOf(key),
+            workerIp,
+            webrtcPort.toString(),
+            gameId,
+            Instant.now().toString(),
+            ttlSeconds,
+        ) ?: 0L
+
+        val isNew = existed == 0L
+        log.info(
+            "Registered room {} ({}), ttl={}",
+            roomId.value,
+            if (isNew) "new" else "overwrite",
+            devTtl?.toString() ?: "none",
         )
 
-        redisTemplate.opsForHash<String, String>().putAll(key, entries)
-
-        if (!devTtl.isNullOrBlank()) {
-            val ttl = Duration.parse(devTtl)
-            redisTemplate.expire(key, ttl)
-            log.info("Registered room {} with TTL {}", roomId.value, ttl)
-        } else {
-            log.info("Registered room {}", roomId.value)
-        }
-
-        return !existingKey
+        return isNew
     }
 }

@@ -13,6 +13,8 @@ import org.springframework.stereotype.Component
 import org.springframework.web.socket.WebSocketHandler
 import org.springframework.web.socket.server.HandshakeInterceptor
 import java.net.URI
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 
 @Component
 class SignalingHandshakeInterceptor(
@@ -107,10 +109,18 @@ class SignalingHandshakeInterceptor(
     }
 
     private fun extractRoomIdFromQuery(uri: URI): String? {
-        val query = uri.query ?: return null
-        return query.split("&")
+        val rawQuery = uri.rawQuery ?: return null
+        return rawQuery.split("&")
+            .asSequence()
             .map { it.split("=", limit = 2) }
-            .firstOrNull { it[0] == QUERY_PARAM_ROOM_ID }
+            .filter { it.isNotEmpty() }
+            .firstOrNull { pair ->
+                decodeComponent(pair[0]) == QUERY_PARAM_ROOM_ID
+            }
             ?.getOrNull(1)
+            ?.let(::decodeComponent)
     }
+
+    private fun decodeComponent(raw: String): String =
+        URLDecoder.decode(raw, StandardCharsets.UTF_8)
 }

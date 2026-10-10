@@ -1,5 +1,6 @@
 package com.cloudgaming.signalingservice.controller
 
+import com.cloudgaming.signalingservice.service.RoomRegistrationService
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.mockk.every
 import io.mockk.mockk

@@ -2,6 +2,7 @@ package com.cloudgaming.signalingservice.controller
 
 import com.cloudgaming.signalingservice.model.RoomId
 import com.cloudgaming.signalingservice.dto.RegisterRoomRequest
+import com.cloudgaming.signalingservice.service.RoomRegistrationService
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.slf4j.LoggerFactory
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty

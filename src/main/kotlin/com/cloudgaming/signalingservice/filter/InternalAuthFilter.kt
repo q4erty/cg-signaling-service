@@ -24,7 +24,7 @@ class InternalAuthFilter(
     }
 
     override fun shouldNotFilter(request: HttpServletRequest): Boolean {
-        val path = request.requestURI
+        val path = request.servletPath
         return !path.startsWith("/internal/")
     }
 
