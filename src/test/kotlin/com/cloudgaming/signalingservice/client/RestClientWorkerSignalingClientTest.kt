@@ -1,6 +1,10 @@
-package com.cloudgaming.signalingservice.worker
+package com.cloudgaming.signalingservice.client
 
+import com.cloudgaming.signalingservice.client.RestClientWorkerSignalingClient
 import com.cloudgaming.signalingservice.config.WorkerProperties
+import com.cloudgaming.signalingservice.exception.WorkerRejectedOfferException
+import com.cloudgaming.signalingservice.exception.WorkerTimeoutException
+import com.cloudgaming.signalingservice.exception.WorkerUnreachableException
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -9,6 +13,7 @@ import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import java.time.Duration
 import java.util.concurrent.TimeUnit
 
 class RestClientWorkerSignalingClientTest {
@@ -24,11 +29,12 @@ class RestClientWorkerSignalingClientTest {
         baseUrl = server.url("/").toString().trimEnd('/')
 
         val properties = WorkerProperties(
-            baseUrl = baseUrl,
-            readyTimeout = java.time.Duration.ofSeconds(2),
+            readyTimeout = Duration.ofSeconds(2),
             // Специально маленький — тест таймаута ниже полагается на то, что 2с
             // короче, чем сервер намеренно задерживает ответ.
-            sdpTimeout = java.time.Duration.ofSeconds(2),
+            sdpTimeout = Duration.ofSeconds(2),
+            connectTimeout = Duration.ofSeconds(5),
+            sdpReadTimeoutSlack = Duration.ofSeconds(30),
         )
         client = RestClientWorkerSignalingClient(properties, jacksonObjectMapper())
     }
