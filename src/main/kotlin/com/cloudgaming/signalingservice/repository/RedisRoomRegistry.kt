@@ -25,6 +25,7 @@ class RedisRoomRegistry(
         private const val FIELD_GAME_ID = "game_id"
         private const val FIELD_STATUS = "status"
         private const val FIELD_CREATED_AT = "created_at"
+        private const val FIELD_OWNER_ID = "owner_id"
     }
 
     override fun resolve(roomId: RoomId): RoomResolutionResult {
@@ -93,6 +94,11 @@ class RedisRoomRegistry(
             throw MalformedRoomException("invalid created_at format: '$createdAtStr'")
         }
 
+        val ownerId = entries[FIELD_OWNER_ID]
+        if (ownerId.isNullOrBlank()) {
+            throw MalformedRoomException("owner_id missing")
+        }
+
         return Room(
             roomId = roomId,
             workerIp = workerIp,
@@ -100,6 +106,7 @@ class RedisRoomRegistry(
             gameId = gameId,
             status = status,
             createdAt = createdAt,
+            ownerId = ownerId,
         )
     }
 

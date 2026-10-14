@@ -1,76 +1,111 @@
 package com.cloudgaming.signalingservice.model
 
-import java.net.Inet4Address
-import java.net.Inet6Address
-import java.net.InetAddress
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Test
 import java.time.Instant
 
-data class Room(
-    val roomId: RoomId,
-    val workerIp: String,
-    val webrtcPort: Int,
-    val gameId: String,
-    val status: RoomStatus,
-    val createdAt: Instant,
-) {
-    companion object {
-        private val HOSTNAME_LABEL_REGEX = Regex("[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?")
+class RoomTest {
 
-        fun validateWorkerIp(ip: String): Boolean {
-            if (ip.isBlank()) return false
-
-            // IPv6 в квадратных скобках (для URL)
-            if (ip.startsWith("[") && ip.endsWith("]")) {
-                val body = ip.substring(1, ip.length - 1)
-                return isValidIpv6(body)
-            }
-
-            // Пробуем распарсить как IP-адрес
-            try {
-                val addr = InetAddress.getByName(ip)
-                if (addr is Inet4Address || addr is Inet6Address) {
-                    return true
-                }
-            } catch (_: Exception) {
-                // Не IP — проверим как hostname
-            }
-
-            // DNS hostname: должен содержать хотя бы одну букву или дефис
-            if (!ip.any { it.isLetter() || it == '-' }) {
-                return false
-            }
-
-            val labels = ip.split(".")
-            if (labels.isEmpty() || labels.size > 127) return false
-            return labels.all { HOSTNAME_LABEL_REGEX.matches(it) }
-        }
-
-        private fun isValidIpv6(ip: String): Boolean {
-            if (!ip.contains(":")) return false
-            try {
-                InetAddress.getByName(ip)
-                return true
-            } catch (_: Exception) {
-                return false
-            }
-        }
-
-        fun validatePort(port: Int): Boolean = port in 1..65535
+    private fun createRoom(
+        workerIp: String,
+        webrtcPort: Int = 9090,
+        ownerId: String = "user-42",
+    ): Room {
+        return Room(
+            roomId = RoomId.of("test-room").getOrThrow(),
+            workerIp = workerIp,
+            webrtcPort = webrtcPort,
+            gameId = "xonotic",
+            status = RoomStatus.ACTIVE,
+            createdAt = Instant.now(),
+            ownerId = ownerId,
+        )
     }
 
-    fun workerBaseUrl(): String {
-        val host = if (workerIp.contains(":") && !workerIp.startsWith("[")) "[$workerIp]" else workerIp
-        return "http://$host:$webrtcPort"
+    @Test
+    fun `workerBaseUrl with IPv4`() {
+        val room = createRoom(workerIp = "192.168.1.100", webrtcPort = 9090)
+        assertEquals("http://192.168.1.100:9090", room.workerBaseUrl())
     }
-}
 
-enum class RoomStatus {
-    ACTIVE,
-    STOPPED,
-    ERROR,
-    ;
+    @Test
+    fun `workerBaseUrl with IPv6`() {
+        val room = createRoom(workerIp = "::1", webrtcPort = 8080)
+        assertEquals("http://[::1]:8080", room.workerBaseUrl())
+    }
 
-    companion object {
-        fun fromString(value: String): RoomStatus? = entries.find { it.name == value }
+    @Test
+    fun `workerBaseUrl with already-bracketed IPv6`() {
+        val room = createRoom(workerIp = "[::1]", webrtcPort = 8080)
+        assertEquals("http://[::1]:8080", room.workerBaseUrl())
+    }
+
+    @Test
+    fun `workerBaseUrl with hostname`() {
+        val room = createRoom(workerIp = "worker-1.game.local", webrtcPort = 7777)
+        assertEquals("http://worker-1.game.local:7777", room.workerBaseUrl())
+    }
+
+    @Test
+    fun `validateWorkerIp accepts valid IPv4`() {
+        assertTrue(Room.validateWorkerIp("192.168.1.1"))
+        assertTrue(Room.validateWorkerIp("0.0.0.0"))
+        assertTrue(Room.validateWorkerIp("255.255.255.255"))
+    }
+
+    @Test
+    fun `validateWorkerIp rejects invalid IPv4`() {
+        assertFalse(Room.validateWorkerIp("256.1.1.1"))
+        assertFalse(Room.validateWorkerIp("192.168.1"))      // ← теперь корректно reject
+        assertFalse(Room.validateWorkerIp("192.168.1.1.1"))
+        assertFalse(Room.validateWorkerIp("01.02.03.04"))    // leading zeros
+    }
+
+    @Test
+    fun `validateWorkerIp accepts valid IPv6 in brackets`() {
+        assertTrue(Room.validateWorkerIp("[::1]"))
+        assertTrue(Room.validateWorkerIp("[2001:db8::1]"))
+    }
+
+    @Test
+    fun `validateWorkerIp accepts valid hostname`() {
+        assertTrue(Room.validateWorkerIp("localhost"))
+        assertTrue(Room.validateWorkerIp("worker-1"))
+        assertTrue(Room.validateWorkerIp("game.worker.local"))
+    }
+
+    @Test
+    fun `validateWorkerIp rejects invalid hostname`() {
+        assertFalse(Room.validateWorkerIp("-worker"))
+        assertFalse(Room.validateWorkerIp("worker-"))
+        assertFalse(Room.validateWorkerIp("worker..local"))
+    }
+
+    @Test
+    fun `validatePort accepts valid ports`() {
+        assertTrue(Room.validatePort(1))
+        assertTrue(Room.validatePort(80))
+        assertTrue(Room.validatePort(8080))
+        assertTrue(Room.validatePort(65535))
+    }
+
+    @Test
+    fun `validatePort rejects invalid ports`() {
+        assertFalse(Room.validatePort(0))
+        assertFalse(Room.validatePort(-1))
+        assertFalse(Room.validatePort(65536))
+        assertFalse(Room.validatePort(70000))
+    }
+
+    @Test
+    fun `RoomStatus fromString returns correct enum`() {
+        assertEquals(RoomStatus.ACTIVE, RoomStatus.fromString("ACTIVE"))
+        assertEquals(RoomStatus.STOPPED, RoomStatus.fromString("STOPPED"))
+        assertEquals(RoomStatus.ERROR, RoomStatus.fromString("ERROR"))
+        assertNull(RoomStatus.fromString("UNKNOWN"))
+        assertNull(RoomStatus.fromString(""))
     }
 }

@@ -1,9 +1,14 @@
 package com.cloudgaming.signalingservice.integration
 
-import com.cloudgaming.signalingservice.model.*
 import com.cloudgaming.signalingservice.dto.ClientMessage
 import com.cloudgaming.signalingservice.dto.ServerMessage
+import com.cloudgaming.signalingservice.model.Room
+import com.cloudgaming.signalingservice.model.RoomId
+import com.cloudgaming.signalingservice.model.RoomResolutionResult
+import com.cloudgaming.signalingservice.model.RoomStatus
 import com.cloudgaming.signalingservice.repository.RoomRegistry
+import com.cloudgaming.signalingservice.security.AuthenticationResult
+import com.cloudgaming.signalingservice.security.HandshakeAuthenticator
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import io.mockk.every
 import io.mockk.mockk
@@ -13,6 +18,7 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.springframework.boot.test.context.SpringBootTest
@@ -33,18 +39,32 @@ class TwoWorkersIntegrationTest {
     companion object {
         @JvmStatic
         fun roomRegistry(): RoomRegistry = mockk(relaxed = true)
-    }
 
-    @LocalServerPort
-    private var port: Int = 0
+        @JvmStatic
+        fun handshakeAuthenticator(): HandshakeAuthenticator {
+            val mock = mockk<HandshakeAuthenticator>()
+            // По умолчанию возвращаем аутентифицированного user-A
+            every { mock.authenticate(any()) } returns AuthenticationResult.Authenticated("user-A")
+            return mock
+        }
+    }
 
     @TestBean
     private lateinit var roomRegistry: RoomRegistry
+
+    @TestBean
+    private lateinit var handshakeAuthenticator: HandshakeAuthenticator
+
+    @LocalServerPort
+    private var port: Int = 0
 
     private lateinit var restClient: RestClient
     private lateinit var workerA: MockWebServer
     private lateinit var workerB: MockWebServer
     private val objectMapper = jacksonObjectMapper()
+
+    private val userA = "user-A"
+    private val userB = "user-B"
 
     @BeforeEach
     fun setUp() {
@@ -83,7 +103,6 @@ class TwoWorkersIntegrationTest {
 
     @Test
     fun `two different room_ids route to two different workers`() {
-        // Mock room A
         val roomA = Room(
             roomId = RoomId.of("room-A").getOrThrow(),
             workerIp = "localhost",
@@ -91,10 +110,10 @@ class TwoWorkersIntegrationTest {
             gameId = "xonotic",
             status = RoomStatus.ACTIVE,
             createdAt = Instant.now(),
+            ownerId = userA,
         )
         every { roomRegistry.resolve(RoomId.of("room-A").getOrThrow()) } returns RoomResolutionResult.Found(roomA)
 
-        // Mock room B
         val roomB = Room(
             roomId = RoomId.of("room-B").getOrThrow(),
             workerIp = "localhost",
@@ -102,19 +121,48 @@ class TwoWorkersIntegrationTest {
             gameId = "xonotic",
             status = RoomStatus.ACTIVE,
             createdAt = Instant.now(),
+            ownerId = userB,
         )
         every { roomRegistry.resolve(RoomId.of("room-B").getOrThrow()) } returns RoomResolutionResult.Found(roomB)
 
-        // Connect and send offers
-        val answerA = connectAndSendOffer("room-A", "offer-from-client-A")
-        val answerB = connectAndSendOffer("room-B", "offer-from-client-B")
+        val userHolder = AtomicReference(userA)
+        every { handshakeAuthenticator.authenticate(any()) } answers {
+            AuthenticationResult.Authenticated(userHolder.get())
+        }
 
-        // Verify routing
+        userHolder.set(userA)
+        val answerA = connectAndSendOffer("room-A", "offer-from-client-A", token = "dummy-token-A")
+
+        userHolder.set(userB)
+        val answerB = connectAndSendOffer("room-B", "offer-from-client-B", token = "dummy-token-B")
+
         assertEquals("answer-from-worker-A", answerA, "Room A should get answer from worker A")
         assertEquals("answer-from-worker-B", answerB, "Room B should get answer from worker B")
     }
 
-    private fun connectAndSendOffer(roomId: String, offerSdp: String): String {
+    @Test
+    fun `user B cannot access room A owned by user A`() {
+        val roomA = Room(
+            roomId = RoomId.of("room-A").getOrThrow(),
+            workerIp = "localhost",
+            webrtcPort = workerA.port,
+            gameId = "xonotic",
+            status = RoomStatus.ACTIVE,
+            createdAt = Instant.now(),
+            ownerId = userA,
+        )
+        every { roomRegistry.resolve(RoomId.of("room-A").getOrThrow()) } returns RoomResolutionResult.Found(roomA)
+
+        every { handshakeAuthenticator.authenticate(any()) } returns AuthenticationResult.Authenticated(userB)
+        val error = connectExpectingError("room-A", token = "dummy-token-B")
+
+        assertTrue(
+            error.contains("FORBIDDEN") || error.contains("403"),
+            "Expected FORBIDDEN, got: $error",
+        )
+    }
+
+    private fun connectAndSendOffer(roomId: String, offerSdp: String, token: String): String {
         val latch = CountDownLatch(1)
         val answerRef = AtomicReference<String>()
         val errorRef = AtomicReference<String>()
@@ -123,7 +171,7 @@ class TwoWorkersIntegrationTest {
         val handler = object : TextWebSocketHandler() {
             override fun handleTextMessage(
                 session: org.springframework.web.socket.WebSocketSession,
-                message: TextMessage
+                message: TextMessage,
             ) {
                 try {
                     val serverMessage = objectMapper.readValue(message.payload, ServerMessage::class.java)
@@ -146,14 +194,14 @@ class TwoWorkersIntegrationTest {
 
             override fun handleTransportError(
                 session: org.springframework.web.socket.WebSocketSession,
-                exception: Throwable
+                exception: Throwable,
             ) {
                 errorRef.set("Transport error: ${exception.message}")
                 latch.countDown()
             }
         }
 
-        val wsUrl = "ws://localhost:$port/api/v1/signaling?room_id=$roomId"
+        val wsUrl = "ws://localhost:$port/api/v1/signaling?room_id=$roomId&token=$token"
 
         val session = try {
             client.execute(handler, wsUrl).get(5, TimeUnit.SECONDS)
@@ -177,5 +225,47 @@ class TwoWorkersIntegrationTest {
         }
 
         return answerRef.get() ?: throw AssertionError("No answer received for room $roomId")
+    }
+
+    private fun connectExpectingError(roomId: String, token: String): String {
+        val latch = CountDownLatch(1)
+        val errorRef = AtomicReference<String>()
+
+        val client = StandardWebSocketClient()
+        val handler = object : TextWebSocketHandler() {
+            override fun handleTextMessage(
+                session: org.springframework.web.socket.WebSocketSession,
+                message: TextMessage,
+            ) {
+                try {
+                    val serverMessage = objectMapper.readValue(message.payload, ServerMessage::class.java)
+                    if (serverMessage is ServerMessage.Error) {
+                        errorRef.set("${serverMessage.code}: ${serverMessage.message}")
+                    }
+                } catch (e: Exception) {
+                    errorRef.set("Parse error: ${e.message}")
+                }
+                latch.countDown()
+            }
+
+            override fun handleTransportError(
+                session: org.springframework.web.socket.WebSocketSession,
+                exception: Throwable,
+            ) {
+                errorRef.set("Transport error: ${exception.message}")
+                latch.countDown()
+            }
+        }
+
+        val wsUrl = "ws://localhost:$port/api/v1/signaling?room_id=$roomId&token=$token"
+
+        try {
+            client.execute(handler, wsUrl).get(5, TimeUnit.SECONDS)
+            latch.await(5, TimeUnit.SECONDS)
+        } catch (e: Exception) {
+            return "Handshake failed: ${e.message}"
+        }
+
+        return errorRef.get() ?: "No error received"
     }
 }

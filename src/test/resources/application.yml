@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: signaling-service-test
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+server:
+  port: 0
+
+websocket:
+  allowed-origins:
+    - "http://localhost:3000"
+
+worker:
+  ready-timeout: 3s
+  connect-timeout: 3s
+  sdp-timeout: 20s
+  sdp-read-timeout-slack: 5s
+  call-executor-pool-size: 10
+
+auth:
+  issuer-uri: https://test-issuer.example.com
+  jwk-set-uri: http://localhost:18080/.well-known/jwks.json
+  user-id-claim: sub
+  clock-skew: 30s
+  allowed-algorithms:
+    - RS256
+  audience: ""
+
+rooms:
+  dev-ttl: ""
+
+internal:
+  secret: test-secret
+
+logging:
+  level:
+    com.cloudgaming.signalingservice: INFO
+    org.springframework.web.socket: INFO

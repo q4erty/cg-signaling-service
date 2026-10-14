@@ -3,7 +3,6 @@ package com.cloudgaming.signalingservice.repository
 import com.cloudgaming.signalingservice.model.RoomId
 import com.cloudgaming.signalingservice.model.RoomResolutionResult
 import com.cloudgaming.signalingservice.model.RoomStatus
-import com.cloudgaming.signalingservice.repository.RedisRoomRegistry
 import io.mockk.every
 import io.mockk.mockk
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -38,32 +37,32 @@ class RedisRoomRegistryTest {
         port: String = "9090",
         gameId: String = "xonotic",
         status: String = "ACTIVE",
+        ownerId: String = "user-42",
     ): Map<String, String> = mapOf(
         "worker_ip" to workerIp,
         "webrtc_port" to port,
         "game_id" to gameId,
         "status" to status,
         "created_at" to Instant.now().toString(),
+        "owner_id" to ownerId,
     )
 
     @Test
     fun `resolve existing room returns Found`() {
         stubRoom("test-room", validEntries())
-
         val result = roomRegistry.resolve(RoomId.of("test-room").getOrThrow())
-
         assertTrue(result is RoomResolutionResult.Found)
         val room = (result as RoomResolutionResult.Found).room
         assertEquals("192.168.1.100", room.workerIp)
         assertEquals(9090, room.webrtcPort)
         assertEquals("xonotic", room.gameId)
         assertEquals(RoomStatus.ACTIVE, room.status)
+        assertEquals("user-42", room.ownerId)  // ← ДОБАВЛЕНО
     }
 
     @Test
     fun `resolve non-existent room returns NotFound`() {
         every { hashOps.entries("room:missing") } returns emptyMap()
-
         val result = roomRegistry.resolve(RoomId.of("missing").getOrThrow())
         assertTrue(result is RoomResolutionResult.NotFound)
     }
@@ -71,7 +70,6 @@ class RedisRoomRegistryTest {
     @Test
     fun `resolve malformed room - missing worker_ip returns Malformed`() {
         stubRoom("malformed", validEntries().minus("worker_ip"))
-
         val result = roomRegistry.resolve(RoomId.of("malformed").getOrThrow())
         assertTrue(result is RoomResolutionResult.Malformed)
         assertTrue((result as RoomResolutionResult.Malformed).reason.contains("worker_ip"))
@@ -80,7 +78,6 @@ class RedisRoomRegistryTest {
     @Test
     fun `resolve malformed room - non-numeric port returns Malformed`() {
         stubRoom("bad-port", validEntries(port = "abc"))
-
         val result = roomRegistry.resolve(RoomId.of("bad-port").getOrThrow())
         assertTrue(result is RoomResolutionResult.Malformed)
         assertTrue((result as RoomResolutionResult.Malformed).reason.contains("webrtc_port"))
@@ -89,7 +86,6 @@ class RedisRoomRegistryTest {
     @Test
     fun `resolve malformed room - out-of-range port returns Malformed`() {
         stubRoom("big-port", validEntries(port = "70000"))
-
         val result = roomRegistry.resolve(RoomId.of("big-port").getOrThrow())
         assertTrue(result is RoomResolutionResult.Malformed)
         assertTrue((result as RoomResolutionResult.Malformed).reason.contains("webrtc_port"))
@@ -98,7 +94,6 @@ class RedisRoomRegistryTest {
     @Test
     fun `resolve malformed room - unknown status returns Malformed`() {
         stubRoom("bad-status", validEntries(status = "UNKNOWN"))
-
         val result = roomRegistry.resolve(RoomId.of("bad-status").getOrThrow())
         assertTrue(result is RoomResolutionResult.Malformed)
         assertTrue((result as RoomResolutionResult.Malformed).reason.contains("status"))
@@ -107,16 +102,22 @@ class RedisRoomRegistryTest {
     @Test
     fun `resolve malformed room - invalid IPv6 returns Malformed`() {
         stubRoom("bad-ipv6", validEntries(workerIp = "[::ggg]"))
-
         val result = roomRegistry.resolve(RoomId.of("bad-ipv6").getOrThrow())
         assertTrue(result is RoomResolutionResult.Malformed)
         assertTrue((result as RoomResolutionResult.Malformed).reason.contains("worker_ip"))
     }
 
     @Test
+    fun `resolve malformed room - missing owner_id returns Malformed`() {
+        stubRoom("no-owner", validEntries().minus("owner_id"))
+        val result = roomRegistry.resolve(RoomId.of("no-owner").getOrThrow())
+        assertTrue(result is RoomResolutionResult.Malformed)
+        assertTrue((result as RoomResolutionResult.Malformed).reason.contains("owner_id"))
+    }
+
+    @Test
     fun `resolve returns Unavailable when Redis is down`() {
         every { hashOps.entries(any()) } throws RedisConnectionFailureException("Redis down", null)
-
         val result = roomRegistry.resolve(RoomId.of("test").getOrThrow())
         assertTrue(result is RoomResolutionResult.Unavailable)
     }
