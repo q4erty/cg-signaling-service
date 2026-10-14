@@ -9,7 +9,13 @@ import org.springframework.security.config.http.SessionCreationPolicy
 import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator
 import org.springframework.security.oauth2.core.OAuth2TokenValidator
 import org.springframework.security.oauth2.jose.jws.SignatureAlgorithm
-import org.springframework.security.oauth2.jwt.*
+import org.springframework.security.oauth2.jwt.Jwt
+import org.springframework.security.oauth2.jwt.JwtClaimNames
+import org.springframework.security.oauth2.jwt.JwtClaimValidator
+import org.springframework.security.oauth2.jwt.JwtDecoder
+import org.springframework.security.oauth2.jwt.JwtTimestampValidator
+import org.springframework.security.oauth2.jwt.JwtValidators
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder
 import org.springframework.security.web.SecurityFilterChain
 
 @Configuration
@@ -51,9 +57,15 @@ class SecurityConfig(
             }
             .build()
 
+        val timestampValidator = JwtTimestampValidator(authProperties.clockSkew)
+        val issuerValidator = JwtClaimValidator<String>(JwtClaimNames.ISS) { iss ->
+            iss == authProperties.issuerUri
+        }
+
+        val defaultWithCustom = JwtValidators.createDefaultWithValidators(issuerValidator, timestampValidator)
+
         val validators = mutableListOf<OAuth2TokenValidator<Jwt>>()
-        validators.add(JwtValidators.createDefaultWithIssuer(authProperties.issuerUri))
-        validators.add(JwtTimestampValidator(authProperties.clockSkew))
+        validators.add(defaultWithCustom)
 
         val audience = authProperties.audienceOrNull
         if (audience != null) {
