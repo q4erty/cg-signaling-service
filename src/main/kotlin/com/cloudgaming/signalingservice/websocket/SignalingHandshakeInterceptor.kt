@@ -1,9 +1,12 @@
 package com.cloudgaming.signalingservice.websocket
 
 import com.cloudgaming.signalingservice.model.RoomId
-import com.cloudgaming.signalingservice.repository.RoomRegistry
 import com.cloudgaming.signalingservice.model.RoomResolutionResult
 import com.cloudgaming.signalingservice.model.RoomStatus
+import com.cloudgaming.signalingservice.repository.RoomRegistry
+import com.cloudgaming.signalingservice.security.AuthenticationResult
+import com.cloudgaming.signalingservice.security.HandshakeAuthenticator
+import jakarta.servlet.http.HttpServletResponse
 import org.slf4j.LoggerFactory
 import org.springframework.http.server.ServerHttpRequest
 import org.springframework.http.server.ServerHttpResponse
@@ -19,6 +22,7 @@ import java.nio.charset.StandardCharsets
 @Component
 class SignalingHandshakeInterceptor(
     private val roomRegistry: RoomRegistry,
+    private val authenticator: HandshakeAuthenticator,
 ) : HandshakeInterceptor {
 
     private val log = LoggerFactory.getLogger(SignalingHandshakeInterceptor::class.java)
@@ -26,7 +30,10 @@ class SignalingHandshakeInterceptor(
     companion object {
         const val ATTR_ROOM_ID = "roomId"
         const val ATTR_WORKER_BASE_URL = "workerBaseUrl"
+        const val ATTR_USER_ID = "userId"
         private const val QUERY_PARAM_ROOM_ID = "room_id"
+        private const val WWW_AUTHENTICATE_HEADER = "WWW-Authenticate"
+        private const val BEARER_CHALLENGE = "Bearer"
     }
 
     override fun beforeHandshake(
@@ -38,41 +45,53 @@ class SignalingHandshakeInterceptor(
         val servletRequest = (request as ServletServerHttpRequest).servletRequest
         val servletResponse = (response as ServletServerHttpResponse).servletResponse
 
+        // Шаг 1: валидация room_id
         val roomIdParam = extractRoomIdFromQuery(request.uri)
         val roomIdResult = RoomId.of(roomIdParam)
 
         if (roomIdResult.isFailure) {
             log.warn("Handshake rejected: {}", HandshakeResolution.INVALID_ROOM_ID.description)
-            servletResponse.status = HandshakeResolution.INVALID_ROOM_ID.httpStatus
+            reject(servletResponse, HandshakeResolution.INVALID_ROOM_ID)
             return false
         }
 
         val roomId = roomIdResult.getOrThrow()
-        val resolution = roomRegistry.resolve(roomId)
 
-        val resolutionResult = when (resolution) {
-            is RoomResolutionResult.Found -> {
-                if (resolution.room.status != RoomStatus.ACTIVE) {
-                    log.info(
-                        "Handshake rejected for room {}: status is {}",
-                        roomId.value,
-                        resolution.room.status,
-                    )
-                    servletResponse.status = HandshakeResolution.ROOM_NOT_ACTIVE.httpStatus
-                    return false
-                }
-
-                attributes[ATTR_ROOM_ID] = roomId.value
-                attributes[ATTR_WORKER_BASE_URL] = resolution.room.workerBaseUrl()
-
-                log.info("Handshake successful for room {}", roomId.value)
-                true
+        // Шаг 2: аутентификация
+        val authResult = authenticator.authenticate(servletRequest)
+        val userId = when (authResult) {
+            is AuthenticationResult.Authenticated -> authResult.userId
+            is AuthenticationResult.Missing -> {
+                log.info("Handshake rejected for room {}: missing token", roomId.value)
+                reject(servletResponse, HandshakeResolution.UNAUTHORIZED, addWwwAuthenticate = true)
+                return false
             }
 
+            is AuthenticationResult.Invalid -> {
+                log.info("Handshake rejected for room {}: invalid token - {}", roomId.value, authResult.reason)
+                reject(servletResponse, HandshakeResolution.UNAUTHORIZED, addWwwAuthenticate = true)
+                return false
+            }
+
+            is AuthenticationResult.Unavailable -> {
+                log.error(
+                    "Handshake rejected for room {}: auth service unavailable",
+                    roomId.value,
+                    authResult.cause,
+                )
+                reject(servletResponse, HandshakeResolution.AUTH_UNAVAILABLE)
+                return false
+            }
+        }
+
+        // Шаг 3: резолв комнаты
+        val resolution = roomRegistry.resolve(roomId)
+        val room = when (resolution) {
+            is RoomResolutionResult.Found -> resolution.room
             is RoomResolutionResult.NotFound -> {
                 log.info("Handshake rejected: room {} not found", roomId.value)
-                servletResponse.status = HandshakeResolution.ROOM_NOT_FOUND.httpStatus
-                false
+                reject(servletResponse, HandshakeResolution.ROOM_NOT_FOUND)
+                return false
             }
 
             is RoomResolutionResult.Malformed -> {
@@ -81,8 +100,8 @@ class SignalingHandshakeInterceptor(
                     roomId.value,
                     resolution.reason,
                 )
-                servletResponse.status = HandshakeResolution.ROOM_MALFORMED.httpStatus
-                false
+                reject(servletResponse, HandshakeResolution.ROOM_MALFORMED)
+                return false
             }
 
             is RoomResolutionResult.Unavailable -> {
@@ -91,12 +110,35 @@ class SignalingHandshakeInterceptor(
                     roomId.value,
                     resolution.cause,
                 )
-                servletResponse.status = HandshakeResolution.REDIS_UNAVAILABLE.httpStatus
-                false
+                reject(servletResponse, HandshakeResolution.REDIS_UNAVAILABLE)
+                return false
             }
         }
 
-        return resolutionResult
+        // Шаг 4: статус
+        if (room.status != RoomStatus.ACTIVE) {
+            log.info(
+                "Handshake rejected for room {}: status is {}",
+                roomId.value,
+                room.status,
+            )
+            reject(servletResponse, HandshakeResolution.ROOM_NOT_ACTIVE)
+            return false
+        }
+
+        // Шаг 5: владелец (строгое сравнение строк)
+        if (room.ownerId != userId) {
+            log.info("Handshake rejected for room {}: user {} is not the owner", roomId.value, userId)
+            reject(servletResponse, HandshakeResolution.FORBIDDEN)
+            return false
+        }
+
+        // Успех: проставляем атрибуты
+        attributes[ATTR_ROOM_ID] = roomId.value
+        attributes[ATTR_WORKER_BASE_URL] = room.workerBaseUrl()
+        attributes[ATTR_USER_ID] = userId
+        log.info("Handshake successful for room {} (user={})", roomId.value, userId)
+        return true
     }
 
     override fun afterHandshake(
@@ -106,6 +148,17 @@ class SignalingHandshakeInterceptor(
         exception: Exception?,
     ) {
         // No-op
+    }
+
+    private fun reject(
+        response: HttpServletResponse,
+        resolution: HandshakeResolution,
+        addWwwAuthenticate: Boolean = false,
+    ) {
+        response.status = resolution.httpStatus
+        if (addWwwAuthenticate) {
+            response.setHeader(WWW_AUTHENTICATE_HEADER, BEARER_CHALLENGE)
+        }
     }
 
     private fun extractRoomIdFromQuery(uri: URI): String? {

@@ -8,7 +8,6 @@ import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.data.redis.core.script.RedisScript
 import org.springframework.stereotype.Service
 import java.time.Duration
-import java.time.Instant
 
 @Service
 class RoomRegistrationService(
@@ -44,6 +43,7 @@ class RoomRegistrationService(
         private const val FIELD_GAME_ID = "game_id"
         private const val FIELD_STATUS = "status"
         private const val FIELD_CREATED_AT = "created_at"
+        private const val FIELD_OWNER_ID = "owner_id"
 
         private const val REGISTER_SCRIPT = """
             local exists = redis.call('EXISTS', KEYS[1])
@@ -52,9 +52,10 @@ class RoomRegistrationService(
                 'webrtc_port', ARGV[2],
                 'game_id', ARGV[3],
                 'status', 'ACTIVE',
-                'created_at', ARGV[4])
-            if ARGV[5] ~= '' then
-                redis.call('EXPIRE', KEYS[1], tonumber(ARGV[5]))
+                'created_at', ARGV[4],
+                'owner_id', ARGV[5])
+            if ARGV[6] ~= '' then
+                redis.call('EXPIRE', KEYS[1], tonumber(ARGV[6]))
             else
                 redis.call('PERSIST', KEYS[1])
             end
@@ -64,7 +65,13 @@ class RoomRegistrationService(
 
     private val script = RedisScript.of(REGISTER_SCRIPT.trimIndent(), Long::class.java)
 
-    fun register(roomId: RoomId, workerIp: String, webrtcPort: Int, gameId: String): Boolean {
+    fun register(
+        roomId: RoomId,
+        workerIp: String,
+        webrtcPort: Int,
+        gameId: String,
+        ownerId: String,
+    ): Boolean {
         if (!Room.validateWorkerIp(workerIp)) {
             throw IllegalArgumentException("Invalid worker_ip: '$workerIp'")
         }
@@ -73,6 +80,12 @@ class RoomRegistrationService(
         }
         if (gameId.isBlank()) {
             throw IllegalArgumentException("gameId is blank")
+        }
+        if (ownerId.isBlank()) {
+            throw IllegalArgumentException("ownerId is blank")
+        }
+        if (ownerId.length > 255) {
+            throw IllegalArgumentException("ownerId too long (max 255)")
         }
 
         val key = "$KEY_PREFIX${roomId.value}"
@@ -84,7 +97,8 @@ class RoomRegistrationService(
             workerIp,
             webrtcPort.toString(),
             gameId,
-            Instant.now().toString(),
+            java.time.Instant.now().toString(),
+            ownerId,
             ttlSeconds,
         ) ?: 0L
 

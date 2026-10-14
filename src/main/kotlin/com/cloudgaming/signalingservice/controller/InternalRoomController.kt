@@ -1,18 +1,15 @@
 package com.cloudgaming.signalingservice.controller
 
-import com.cloudgaming.signalingservice.model.RoomId
 import com.cloudgaming.signalingservice.dto.RegisterRoomRequest
+import com.cloudgaming.signalingservice.model.RoomId
 import com.cloudgaming.signalingservice.service.RoomRegistrationService
 import com.fasterxml.jackson.databind.ObjectMapper
+import jakarta.validation.Validator
 import org.slf4j.LoggerFactory
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
-import org.springframework.web.bind.annotation.PathVariable
-import org.springframework.web.bind.annotation.PostMapping
-import org.springframework.web.bind.annotation.RequestBody
-import org.springframework.web.bind.annotation.RequestMapping
-import org.springframework.web.bind.annotation.RestController
+import org.springframework.web.bind.annotation.*
 
 @RestController
 @RequestMapping("/internal/rooms")
@@ -20,6 +17,7 @@ import org.springframework.web.bind.annotation.RestController
 class InternalRoomController(
     private val roomRegistrationService: RoomRegistrationService,
     private val objectMapper: ObjectMapper,
+    private val validator: Validator,
 ) {
 
     private val log = LoggerFactory.getLogger(InternalRoomController::class.java)
@@ -45,12 +43,21 @@ class InternalRoomController(
                 .body("Invalid request body: ${e.message}")
         }
 
+        val violations = validator.validate(request)
+        if (violations.isNotEmpty()) {
+            val message = violations.joinToString("; ") { "${it.propertyPath}: ${it.message}" }
+            return ResponseEntity
+                .status(HttpStatus.BAD_REQUEST)
+                .body("Validation failed: $message")
+        }
+
         return try {
             val isNew = roomRegistrationService.register(
                 roomId = roomIdResult.getOrThrow(),
                 workerIp = request.workerIp,
                 webrtcPort = request.webrtcPort,
                 gameId = request.gameId,
+                ownerId = request.ownerId,
             )
 
             val status = if (isNew) HttpStatus.CREATED else HttpStatus.OK
