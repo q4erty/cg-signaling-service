@@ -6,18 +6,23 @@ import com.cloudgaming.signalingservice.exception.WorkerRejectedOfferException
 import com.cloudgaming.signalingservice.exception.WorkerTimeoutException
 import com.cloudgaming.signalingservice.exception.WorkerUnreachableException
 import com.fasterxml.jackson.databind.ObjectMapper
+import jakarta.annotation.PreDestroy
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
 import org.springframework.http.HttpStatusCode
 import org.springframework.http.MediaType
 import org.springframework.http.client.JdkClientHttpRequestFactory
-import jakarta.annotation.PreDestroy
 import org.springframework.stereotype.Component
 import org.springframework.web.client.RestClient
 import org.springframework.web.client.RestClientException
+import org.springframework.web.client.RestClientResponseException
+import org.springframework.web.client.UnknownContentTypeException
 import java.io.IOException
+import java.net.ConnectException
 import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.net.http.HttpClient
+import java.net.http.HttpConnectTimeoutException
 import java.net.http.HttpTimeoutException
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
@@ -30,7 +35,6 @@ import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicLong
 
 private data class OfferRequestBody(val sdp: String, val type: String = "offer")
-
 private data class ReadyResponseBody(val status: String? = null, val pipeline: String? = null)
 
 private object WorkerApi {
@@ -53,8 +57,6 @@ class RestClientWorkerSignalingClient(
         connectionTimeout = workerProperties.readyTimeout,
     )
 
-    /** Read-timeout больше sdpTimeout: JDK HttpClient не кидает HttpTimeoutException
-     *  при таймауте чтения тела (JDK-8208693) — реальный дедлайн см. future.get() ниже. */
     private val sdpClient: RestClient = buildClient(
         responseTimeout = workerProperties.sdpTimeout.plus(workerProperties.sdpReadTimeoutSlack),
         connectionTimeout = workerProperties.connectTimeout,
@@ -76,9 +78,11 @@ class RestClientWorkerSignalingClient(
         val httpClient = HttpClient.newBuilder()
             .connectTimeout(connectionTimeout)
             .build()
+
         val requestFactory = JdkClientHttpRequestFactory(httpClient).apply {
             setReadTimeout(responseTimeout)
         }
+
         return RestClient.builder()
             .requestFactory(requestFactory)
             .build()
@@ -91,6 +95,7 @@ class RestClientWorkerSignalingClient(
                 .retrieve()
                 .body(String::class.java)
                 ?: return false
+
             val parsed = objectMapper.readValue(body, ReadyResponseBody::class.java)
             parsed.pipeline == WorkerApi.PIPELINE_PLAYING
         } catch (e: Exception) {
@@ -100,10 +105,10 @@ class RestClientWorkerSignalingClient(
     }
 
     override fun exchangeSdp(workerBaseUrl: String, offerSdp: String): SdpAnswer {
-        val requestBody = objectMapper.writeValueAsString(OfferRequestBody(sdp = offerSdp))
+        val requestBody = objectMapper.writeValueAsString(OfferRequestBody(sdp = offerSdp, type = "offer"))
 
         val future = CompletableFuture.supplyAsync({
-            sdpClient.post()
+            val response = sdpClient.post()
                 .uri("$workerBaseUrl${WorkerApi.SDP_PATH}")
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(requestBody)
@@ -112,8 +117,15 @@ class RestClientWorkerSignalingClient(
                     val text = response.body.readAllBytes().toString(Charsets.UTF_8)
                     throw WorkerRejectedOfferException(workerBaseUrl, extractDetail(text))
                 }
+                .onStatus({ status: HttpStatusCode -> status.is5xxServerError }) { request, response ->
+                    throw WorkerProtocolException(
+                        workerBaseUrl,
+                        "Worker returned ${response.statusCode.value()} on ${request.uri}",
+                    )
+                }
                 .body(String::class.java)
-                ?: throw WorkerProtocolException(workerBaseUrl, "empty response body")
+
+            response ?: throw WorkerProtocolException(workerBaseUrl, "empty response body")
         }, sdpExecutor)
 
         val responseBody: String
@@ -126,18 +138,8 @@ class RestClientWorkerSignalingClient(
             when (val cause = e.cause) {
                 is WorkerRejectedOfferException -> throw cause
                 is WorkerProtocolException -> throw cause
-                is RestClientException -> {
-                    if (cause.hasTimeoutCause()) {
-                        throw WorkerTimeoutException(workerBaseUrl, cause)
-                    }
-                    throw WorkerUnreachableException(workerBaseUrl, cause)
-                }
-                is IOException -> {
-                    if (cause.hasTimeoutCause()) {
-                        throw WorkerTimeoutException(workerBaseUrl, cause)
-                    }
-                    throw WorkerUnreachableException(workerBaseUrl, cause)
-                }
+                is RestClientException -> throw classifyException(workerBaseUrl, cause)
+                is IOException -> throw classifyException(workerBaseUrl, cause)
                 else -> throw WorkerProtocolException(workerBaseUrl, "unexpected error calling worker", cause ?: e)
             }
         }
@@ -145,19 +147,52 @@ class RestClientWorkerSignalingClient(
         return try {
             objectMapper.readValue(responseBody, SdpAnswer::class.java)
         } catch (e: Exception) {
-            throw WorkerProtocolException(workerBaseUrl, "не удалось разобрать ответ как SdpAnswer", e)
+            throw WorkerProtocolException(workerBaseUrl, "failed to parse response as SdpAnswer", e)
         }
     }
 
-    private fun Throwable.hasTimeoutCause(): Boolean {
-        var current: Throwable? = this
+    private fun classifyException(workerBaseUrl: String, throwable: Throwable): RuntimeException {
+        var current: Throwable? = throwable
         while (current != null) {
-            if (current is HttpTimeoutException || current is SocketTimeoutException) {
-                return true
+            when (current) {
+                is HttpConnectTimeoutException -> {
+                    return WorkerUnreachableException(workerBaseUrl, throwable)
+                }
+                is HttpTimeoutException, is SocketTimeoutException -> {
+                    return WorkerTimeoutException(workerBaseUrl, throwable)
+                }
+                is ConnectException, is UnknownHostException -> {
+                    return WorkerUnreachableException(workerBaseUrl, throwable)
+                }
+                is RestClientResponseException -> {
+                    return WorkerProtocolException(
+                        workerBaseUrl,
+                        "Worker returned HTTP ${current.statusCode} on ${current.message}",
+                        throwable,
+                    )
+                }
+                is UnknownContentTypeException -> {
+                    return WorkerProtocolException(
+                        workerBaseUrl,
+                        "Worker returned unexpected content type: ${current.contentType}",
+                        throwable,
+                    )
+                }
+                is IOException -> {
+                    val message = current.message?.lowercase() ?: ""
+                    if (message.contains("connection reset") ||
+                        message.contains("connection closed") ||
+                        message.contains("broken pipe") ||
+                        message.contains("eof")
+                    ) {
+                        return WorkerUnreachableException(workerBaseUrl, throwable)
+                    }
+                    return WorkerUnreachableException(workerBaseUrl, throwable)
+                }
             }
             current = current.cause
         }
-        return false
+        return WorkerUnreachableException(workerBaseUrl, throwable)
     }
 
     private fun extractDetail(rawBody: String): String =

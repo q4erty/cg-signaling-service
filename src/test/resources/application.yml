@@ -12,6 +12,7 @@ server:
 websocket:
   allowed-origins:
     - "http://localhost:3000"
+  idle-timeout: 60s
 
 worker:
   ready-timeout: 3s
