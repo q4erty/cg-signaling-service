@@ -15,6 +15,8 @@ import org.springframework.http.client.JdkClientHttpRequestFactory
 import org.springframework.stereotype.Component
 import org.springframework.web.client.RestClient
 import org.springframework.web.client.RestClientException
+import org.springframework.web.client.RestClientResponseException
+import org.springframework.web.client.UnknownContentTypeException
 import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
@@ -153,11 +155,28 @@ class RestClientWorkerSignalingClient(
         var current: Throwable? = throwable
         while (current != null) {
             when (current) {
+                is HttpConnectTimeoutException -> {
+                    return WorkerUnreachableException(workerBaseUrl, throwable)
+                }
                 is HttpTimeoutException, is SocketTimeoutException -> {
                     return WorkerTimeoutException(workerBaseUrl, throwable)
                 }
-                is HttpConnectTimeoutException, is ConnectException, is UnknownHostException -> {
+                is ConnectException, is UnknownHostException -> {
                     return WorkerUnreachableException(workerBaseUrl, throwable)
+                }
+                is RestClientResponseException -> {
+                    return WorkerProtocolException(
+                        workerBaseUrl,
+                        "Worker returned HTTP ${current.statusCode} on ${current.message}",
+                        throwable,
+                    )
+                }
+                is UnknownContentTypeException -> {
+                    return WorkerProtocolException(
+                        workerBaseUrl,
+                        "Worker returned unexpected content type: ${current.contentType}",
+                        throwable,
+                    )
                 }
                 is IOException -> {
                     val message = current.message?.lowercase() ?: ""
@@ -168,6 +187,7 @@ class RestClientWorkerSignalingClient(
                     ) {
                         return WorkerUnreachableException(workerBaseUrl, throwable)
                     }
+                    return WorkerUnreachableException(workerBaseUrl, throwable)
                 }
             }
             current = current.cause
