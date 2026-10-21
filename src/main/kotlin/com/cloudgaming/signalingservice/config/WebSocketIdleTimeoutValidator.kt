@@ -20,7 +20,7 @@ class WebSocketIdleTimeoutValidator(
             val message = """
                 WebSocket idle timeout (${webSocketProperties.idleTimeout}) is too short.
                 Worst case wait time is $worstCaseWait (readyTimeout: ${workerProperties.readyTimeout} + sdpTimeout: ${workerProperties.sdpTimeout}).
-                Set websocket.idle-timeout to at least $worstCaseWait to prevent premature connection closure during SDP exchange.
+                Set websocket.idle-timeout to a value greater than $worstCaseWait to prevent premature connection closure during SDP exchange.
             """.trimIndent()
 
             log.error(message)
@@ -28,7 +28,7 @@ class WebSocketIdleTimeoutValidator(
         }
 
         log.info(
-            "WebSocket idle timeout validation passed: {} >= {} (worst case)",
+            "WebSocket idle timeout validation passed: {} > {} (worst case)",
             webSocketProperties.idleTimeout,
             worstCaseWait,
         )
