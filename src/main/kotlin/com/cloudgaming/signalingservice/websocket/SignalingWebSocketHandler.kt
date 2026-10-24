@@ -9,6 +9,8 @@ import com.cloudgaming.signalingservice.exception.WorkerProtocolException
 import com.cloudgaming.signalingservice.exception.WorkerRejectedOfferException
 import com.cloudgaming.signalingservice.exception.WorkerTimeoutException
 import com.cloudgaming.signalingservice.exception.WorkerUnreachableException
+import com.cloudgaming.signalingservice.observability.LogContext
+import com.cloudgaming.signalingservice.observability.ObservabilityService
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
@@ -26,6 +28,7 @@ class SignalingWebSocketHandler(
     private val objectMapper: ObjectMapper,
     private val workerCallExecutor: ExecutorService,
     private val workerProperties: WorkerProperties,
+    private val observabilityService: ObservabilityService,
 ) : TextWebSocketHandler() {
 
     private val log = LoggerFactory.getLogger(SignalingWebSocketHandler::class.java)
@@ -38,7 +41,15 @@ class SignalingWebSocketHandler(
             bufferSizeLimit = BUFFER_SIZE_LIMIT_BYTES,
         )
         sessions[session.id] = state
-        log.info("WS {}: connected (room={})", session.id, state.roomId ?: "unknown")
+        observabilityService.sessionOpened(session.id)
+
+        LogContext.set(
+            connectionId = state.connectionId,
+            roomId = state.roomId,
+            userId = state.userId,
+        )
+        log.info("ws_connected")
+        LogContext.clear()
     }
 
     public override fun handleTextMessage(session: WebSocketSession, message: TextMessage) {
@@ -49,6 +60,13 @@ class SignalingWebSocketHandler(
                 return
             }
 
+            LogContext.set(
+                connectionId = state.connectionId,
+                roomId = state.roomId,
+                userId = state.userId,
+                worker = state.workerBaseUrl,
+            )
+
             val workerBaseUrl = session.attributes[SignalingHandshakeInterceptor.ATTR_WORKER_BASE_URL] as? String
             if (workerBaseUrl == null) {
                 log.error(
@@ -56,6 +74,7 @@ class SignalingWebSocketHandler(
                     session.id,
                 )
                 sendSafely(state, ServerMessage.Error(ErrorCode.INTERNAL_ERROR, "Server configuration error"))
+                LogContext.clear()
                 return
             }
 
@@ -64,6 +83,7 @@ class SignalingWebSocketHandler(
             } catch (e: Exception) {
                 log.warn("WS {}: malformed message: {}", session.id, e.toString())
                 sendSafely(state, ServerMessage.Error(ErrorCode.INVALID_MESSAGE, "Malformed message: ${e.message}"))
+                LogContext.clear()
                 return
             }
 
@@ -76,17 +96,52 @@ class SignalingWebSocketHandler(
             if (state != null) {
                 sendSafely(state, ServerMessage.Error(ErrorCode.INTERNAL_ERROR, "Unexpected server error"))
             }
+        } finally {
+            LogContext.clear()
         }
     }
 
     override fun handleTransportError(session: WebSocketSession, exception: Throwable) {
+        val state = sessions[session.id]
+        if (state != null) {
+            LogContext.set(
+                connectionId = state.connectionId,
+                roomId = state.roomId,
+                userId = state.userId,
+            )
+        }
+
         log.warn("WS {}: transport error: {}", session.id, exception.toString())
         sessions.remove(session.id)
+        observabilityService.sessionClosed(session.id)
+
+        if (state != null) {
+            val sessionDurationMs = java.time.Duration.between(state.createdAt, java.time.Instant.now()).toMillis()
+            log.info("ws_closed closeCode=TRANSPORT_ERROR sessionDurationMs={}", sessionDurationMs)
+        }
+
+        LogContext.clear()
     }
 
     override fun afterConnectionClosed(session: WebSocketSession, closeStatus: CloseStatus) {
+        val state = sessions[session.id]
+        if (state != null) {
+            LogContext.set(
+                connectionId = state.connectionId,
+                roomId = state.roomId,
+                userId = state.userId,
+            )
+        }
+
         sessions.remove(session.id)
-        log.info("WS {}: closed ({})", session.id, closeStatus)
+        observabilityService.sessionClosed(session.id)
+
+        if (state != null) {
+            val sessionDurationMs = java.time.Duration.between(state.createdAt, java.time.Instant.now()).toMillis()
+            log.info("ws_closed closeCode={} sessionDurationMs={}", closeStatus.code, sessionDurationMs)
+        }
+
+        LogContext.clear()
     }
 
     private fun handleOffer(
@@ -96,9 +151,20 @@ class SignalingWebSocketHandler(
     ) {
         val sessionId = state.decoratedSession.id
 
+        LogContext.set(
+            connectionId = state.connectionId,
+            roomId = state.roomId,
+            userId = state.userId,
+            worker = workerBaseUrl,
+        )
+
+        log.info("offer_received")
+
         if (!state.tryStartOffer()) {
             log.info("WS {}: offer rejected - previous offer still in progress", sessionId)
             sendSafely(state, ServerMessage.Error(ErrorCode.OFFER_IN_PROGRESS, "Previous offer is still being processed"))
+            log.info("offer_rejected errorCode={}", ErrorCode.OFFER_IN_PROGRESS.name)
+            LogContext.clear()
             return
         }
 
@@ -108,16 +174,20 @@ class SignalingWebSocketHandler(
                     processOffer(state, offer, workerBaseUrl)
                 } finally {
                     state.finishOffer()
+                    LogContext.clear()
                 }
             }
         } catch (e: RejectedExecutionException) {
             log.warn("WS {}: executor pool exhausted", sessionId)
             state.finishOffer()
             sendSafely(state, ServerMessage.Error(ErrorCode.SERVER_BUSY, "Server is busy, try again later"))
+            log.info("offer_rejected errorCode={}", ErrorCode.SERVER_BUSY.name)
+            LogContext.clear()
         } catch (e: Exception) {
             log.error("WS {}: unexpected error submitting task to executor", sessionId, e)
             state.finishOffer()
             sendSafely(state, ServerMessage.Error(ErrorCode.INTERNAL_ERROR, "Unexpected server error"))
+            LogContext.clear()
         }
     }
 
@@ -128,30 +198,51 @@ class SignalingWebSocketHandler(
     ) {
         val sessionId = state.decoratedSession.id
 
+        LogContext.set(
+            connectionId = state.connectionId,
+            roomId = state.roomId,
+            userId = state.userId,
+            worker = workerBaseUrl,
+        )
+
+        val startTime = System.nanoTime()
+        var outcome = "SUCCESS"
+
         try {
             if (!workerSignalingClient.isReady(workerBaseUrl)) {
+                outcome = ErrorCode.WORKER_NOT_READY.name
                 log.info("WS {}: worker {} not ready", sessionId, workerBaseUrl)
                 sendSafely(state, ServerMessage.Error(ErrorCode.WORKER_NOT_READY, "Worker is not ready"))
                 return
             }
 
+            log.info("sdp_call_started")
             val answer = workerSignalingClient.exchangeSdp(workerBaseUrl, offer.sdp)
             sendSafely(state, ServerMessage.Answer(sdp = answer.sdp))
         } catch (e: WorkerTimeoutException) {
+            outcome = ErrorCode.WORKER_TIMEOUT.name
             log.warn("WS {}: {}", sessionId, e.message)
             sendSafely(state, ServerMessage.Error(ErrorCode.WORKER_TIMEOUT, e.message ?: "Worker timed out"))
         } catch (e: WorkerUnreachableException) {
+            outcome = ErrorCode.WORKER_UNREACHABLE.name
             log.warn("WS {}: {}", sessionId, e.message)
             sendSafely(state, ServerMessage.Error(ErrorCode.WORKER_UNREACHABLE, e.message ?: "Worker unreachable"))
         } catch (e: WorkerRejectedOfferException) {
+            outcome = ErrorCode.WORKER_REJECTED_OFFER.name
             log.info("WS {}: worker rejected offer: {}", sessionId, e.workerMessage)
             sendSafely(state, ServerMessage.Error(ErrorCode.WORKER_REJECTED_OFFER, e.workerMessage))
         } catch (e: WorkerProtocolException) {
+            outcome = ErrorCode.WORKER_ERROR.name
             log.warn("WS {}: worker protocol error: {}", sessionId, e.message)
             sendSafely(state, ServerMessage.Error(ErrorCode.WORKER_ERROR, e.message ?: "Worker protocol error"))
         } catch (e: Exception) {
+            outcome = ErrorCode.INTERNAL_ERROR.name
             log.error("WS {}: unexpected error processing offer", sessionId, e)
             sendSafely(state, ServerMessage.Error(ErrorCode.INTERNAL_ERROR, "Unexpected server error"))
+        } finally {
+            val durationMs = (System.nanoTime() - startTime) / 1_000_000
+            observabilityService.recordSdpDuration(outcome, durationMs)
+            LogContext.clear()
         }
     }
 
@@ -159,25 +250,29 @@ class SignalingWebSocketHandler(
         val session = state.decoratedSession
 
         if (!session.isOpen) {
-            log.info(
-                "WS {}: session closed, dropping {} response (room={})",
-                session.id,
-                message.type,
-                state.roomId ?: "unknown",
+            LogContext.set(
+                connectionId = state.connectionId,
+                roomId = state.roomId,
             )
+            log.info("answer_discarded")
+            LogContext.clear()
             return
         }
 
         try {
             session.sendMessage(TextMessage(objectMapper.writeValueAsString(message)))
         } catch (e: Exception) {
+            LogContext.set(
+                connectionId = state.connectionId,
+                roomId = state.roomId,
+            )
             log.info(
-                "WS {}: failed to send {} message: {} (room={})",
+                "WS {}: failed to send {} message: {}",
                 session.id,
                 message.type,
                 e.toString(),
-                state.roomId ?: "unknown",
             )
+            LogContext.clear()
         }
     }
 
