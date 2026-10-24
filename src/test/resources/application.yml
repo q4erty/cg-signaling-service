@@ -9,6 +9,12 @@ spring:
 server:
   port: 0
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+
 websocket:
   allowed-origins:
     - "http://localhost:3000"
@@ -37,6 +43,8 @@ internal:
   secret: test-secret
 
 logging:
+  structured:
+    format:
+      console: ecs
   level:
     com.cloudgaming.signalingservice: INFO
-    org.springframework.web.socket: INFO

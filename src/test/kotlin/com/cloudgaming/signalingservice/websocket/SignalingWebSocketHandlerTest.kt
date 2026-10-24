@@ -4,7 +4,9 @@ import com.cloudgaming.signalingservice.client.WorkerSignalingClient
 import com.cloudgaming.signalingservice.config.WorkerProperties
 import com.cloudgaming.signalingservice.dto.ErrorCode
 import com.cloudgaming.signalingservice.exception.WorkerTimeoutException
+import com.cloudgaming.signalingservice.observability.ObservabilityService
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.mockk.CapturingSlot
 import io.mockk.every
 import io.mockk.mockk
@@ -34,13 +36,8 @@ class SignalingWebSocketHandlerTest {
     private val workerSignalingClient = mockk<WorkerSignalingClient>()
     private val objectMapper = jacksonObjectMapper()
     private val workerBaseUrl = "http://worker.local:9090"
-    private val workerProperties = WorkerProperties(
-        readyTimeout = Duration.ofSeconds(3),
-        connectTimeout = Duration.ofSeconds(3),
-        sdpTimeout = Duration.ofSeconds(20),
-        sdpReadTimeoutSlack = Duration.ofSeconds(5),
-        callExecutorPoolSize = 100,
-    )
+    private val workerProperties = WorkerProperties()
+    private val observabilityService = ObservabilityService(SimpleMeterRegistry())
 
     private lateinit var handler: SignalingWebSocketHandler
     private lateinit var session: WebSocketSession
@@ -52,7 +49,8 @@ class SignalingWebSocketHandlerTest {
             workerSignalingClient = workerSignalingClient,
             objectMapper = objectMapper,
             workerCallExecutor = DirectExecutorService(),
-            workerProperties = workerProperties,  // ← ДОБАВЛЕНО
+            workerProperties = workerProperties,
+            observabilityService = observabilityService,
         )
 
         session = mockk(relaxed = true)
@@ -149,19 +147,18 @@ class SignalingWebSocketHandlerTest {
         val sessionWithoutWorker = mockk<WebSocketSession>(relaxed = true)
         every { sessionWithoutWorker.id } returns "session-without-worker"
         every { sessionWithoutWorker.isOpen } returns true
-        every { sessionWithoutWorker.attributes } returns mutableMapOf() // No ATTR_WORKER_BASE_URL
+        every { sessionWithoutWorker.attributes } returns mutableMapOf()
 
-        val sentMessage = slot<TextMessage>()
-        every { sessionWithoutWorker.sendMessage(capture(sentMessage)) } returns Unit
+        val sentMessageLocal = slot<TextMessage>()
+        every { sessionWithoutWorker.sendMessage(capture(sentMessageLocal)) } returns Unit
 
         handler.afterConnectionEstablished(sessionWithoutWorker)
-
         handler.handleTextMessage(sessionWithoutWorker, TextMessage("""{"type": "offer", "sdp": "v=0...offer"}"""))
 
         verify(exactly = 0) { sessionWithoutWorker.close(any<org.springframework.web.socket.CloseStatus>()) }
         verify(exactly = 1) { sessionWithoutWorker.sendMessage(any()) }
 
-        val response = objectMapper.readTree(sentMessage.captured.payload)
+        val response = objectMapper.readTree(sentMessageLocal.captured.payload)
         assertThat(response["type"].asText()).isEqualTo("error")
         assertThat(response["code"].asText()).isEqualTo(ErrorCode.INTERNAL_ERROR.name)
 
