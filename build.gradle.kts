@@ -73,7 +73,7 @@ val integrationTest by tasks.registering(Test::class) {
     shouldRunAfter(tasks.test)
 }
 
-tasks.withType<Test> {
+tasks.named<Test>("test") {
     useJUnitPlatform {
         excludeTags("integration")
     }

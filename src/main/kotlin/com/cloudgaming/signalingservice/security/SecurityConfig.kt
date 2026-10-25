@@ -62,7 +62,8 @@ class SecurityConfig(
         val validators = mutableListOf<OAuth2TokenValidator<Jwt>>()
         validators.add(defaultWithCustom)
 
-        authProperties.audienceOrNull?.let { audience ->
+        val audience = authProperties.audienceOrNull
+        if (audience != null) {
             validators.add(JwtClaimValidator<List<String>>(JwtClaimNames.AUD) { audList ->
                 audience in audList
             })

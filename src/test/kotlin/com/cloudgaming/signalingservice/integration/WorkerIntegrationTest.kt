@@ -57,16 +57,25 @@ class WorkerIntegrationTest {
         private const val ROOM_ID = "integration-room"
 
         private val jwtHelper = JwtTestHelper(issuer = "https://test-issuer.example.com")
+
+        // Запускаем сразу при загрузке класса (ДО @DynamicPropertySource)
+        private val jwksServer = JwksStubServer(listOf(jwtHelper.publicKey)).also { it.start() }
+
         private var workerContainer: GenericContainer<*>? = null
-        private var jwksServer: JwksStubServer? = null
         private var portWasFree = false
 
         @JvmStatic
         @DynamicPropertySource
         fun properties(registry: DynamicPropertyRegistry) {
             registry.add("auth.issuer-uri") { jwtHelper.issuer }
-            registry.add("auth.jwk-set-uri") { jwksServer?.jwksUri ?: "http://localhost:18080/.well-known/jwks.json" }
+            registry.add("auth.jwk-set-uri") { jwksServer.jwksUri }
             registry.add("internal.secret") { "test-secret" }
+        }
+
+        @JvmStatic
+        @AfterAll
+        fun stopJwks() {
+            jwksServer.stop()
         }
 
         private fun checkPreconditions() {
@@ -123,13 +132,36 @@ class WorkerIntegrationTest {
         }
 
         private fun startWorker() {
+            val imageExists = try {
+                val process = ProcessBuilder("docker", "image", "inspect", WORKER_IMAGE)
+                    .redirectErrorStream(true)
+                    .start()
+                val completed = process.waitFor(10, TimeUnit.SECONDS)
+                completed && process.exitValue() == 0
+            } catch (e: Exception) {
+                false
+            }
+
+            if (!imageExists) {
+                val msg = "Image '$WORKER_IMAGE' not found locally. Build it first: docker build -t $WORKER_IMAGE ."
+                if (REQUIRE_INTEGRATION) throw IllegalStateException(msg)
+                assumeTrue(false, msg)
+            }
+
             workerContainer = GenericContainer(WORKER_IMAGE)
                 .withNetworkMode("host")
                 .withEnv("HTTP_PORT", WORKER_PORT.toString())
                 .waitingFor(Wait.forLogMessage(".*Pipeline is PLAYING.*", 1))
                 .withStartupTimeout(Duration.ofSeconds(60))
 
-            workerContainer!!.start()
+            try {
+                workerContainer!!.start()
+            } catch (e: IllegalStateException) {
+                val msg = "Testcontainers cannot find Docker: ${e.message}"
+                workerContainer = null
+                if (REQUIRE_INTEGRATION) throw IllegalStateException(msg)
+                assumeTrue(false, msg)
+            }
 
             await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(500)).until {
                 try {
@@ -159,7 +191,6 @@ class WorkerIntegrationTest {
 
     @BeforeAll
     fun setUp() {
-        jwksServer = JwksStubServer(listOf(jwtHelper.publicKey)).also { it.start() }
         checkPreconditions()
         startWorker()
     }
@@ -167,7 +198,6 @@ class WorkerIntegrationTest {
     @AfterAll
     fun tearDown() {
         stopWorker()
-        jwksServer?.stop()
     }
 
     @Test

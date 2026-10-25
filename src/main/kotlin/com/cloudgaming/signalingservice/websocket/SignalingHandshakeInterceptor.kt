@@ -75,15 +75,17 @@ class SignalingHandshakeInterceptor(
                 return false
             }
             is AuthenticationResult.Invalid -> {
-                logHandshakeRejected(connectionId, roomId.value, HandshakeResolution.AUTH_UNAVAILABLE, "JWKS endpoint unavailable")
+                log.info("Handshake rejected (UNAUTHORIZED) for room {}: invalid token - {}", roomId.value, authResult.reason)
                 reject(servletResponse, HandshakeResolution.UNAUTHORIZED, addWwwAuthenticate = true)
-                LogContext.clear()
                 return false
             }
             is AuthenticationResult.Unavailable -> {
-                logHandshakeRejected(connectionId, roomId.value, HandshakeResolution.REDIS_UNAVAILABLE, "Redis connection failed")
+                log.error(
+                    "Handshake rejected (AUTH_UNAVAILABLE) for room {}: auth service unavailable",
+                    roomId.value,
+                    authResult.cause,
+                )
                 reject(servletResponse, HandshakeResolution.AUTH_UNAVAILABLE)
-                LogContext.clear()
                 return false
             }
         }
