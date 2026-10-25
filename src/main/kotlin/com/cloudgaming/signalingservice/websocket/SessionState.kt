@@ -11,7 +11,8 @@ class SessionState(
     sendTimeLimit: Int,
     bufferSizeLimit: Int,
 ) {
-    val connectionId: String = LogContext.generateConnectionId()
+    val connectionId: String = session.attributes[SignalingHandshakeInterceptor.ATTR_CONNECTION_ID] as? String
+        ?: LogContext.generateConnectionId()
     val decoratedSession: WebSocketSession = ConcurrentWebSocketSessionDecorator(
         session,
         sendTimeLimit,

@@ -32,8 +32,6 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("io.micrometer:micrometer-registry-prometheus")
 
-    implementation("co.elastic.logging:logback-ecs-encoder:1.6.0")
-
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
     implementation("org.jetbrains.kotlin:kotlin-reflect")
@@ -67,8 +65,8 @@ sourceSets {
 val integrationTest by tasks.registering(Test::class) {
     description = "Runs integration tests requiring Docker and real worker container"
     group = "verification"
-    testClassesDirs = sourceSets["integrationTest"].output.classesDirs
-    classpath = sourceSets["integrationTest"].runtimeClasspath
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
     useJUnitPlatform {
         includeTags("integration")
     }

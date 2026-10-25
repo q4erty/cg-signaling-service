@@ -57,18 +57,18 @@ class SecurityConfig(
             iss == authProperties.issuerUri
         }
 
-        val validators = mutableListOf<OAuth2TokenValidator<Jwt>>()
-        validators.add(JwtValidators.createDefaultWithValidators(issuerValidator, timestampValidator))
+        val defaultWithCustom = JwtValidators.createDefaultWithValidators(issuerValidator, timestampValidator)
 
-        val audience = authProperties.audienceOrNull
-        if (audience != null) {
+        val validators = mutableListOf<OAuth2TokenValidator<Jwt>>()
+        validators.add(defaultWithCustom)
+
+        authProperties.audienceOrNull?.let { audience ->
             validators.add(JwtClaimValidator<List<String>>(JwtClaimNames.AUD) { audList ->
-                audList != null && audience in audList
+                audience in audList
             })
         }
 
         decoder.setJwtValidator(DelegatingOAuth2TokenValidator(validators))
-
         return decoder
     }
 }

@@ -10,6 +10,7 @@ import com.cloudgaming.signalingservice.security.HandshakeAuthenticator
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
 import org.slf4j.LoggerFactory
+import org.slf4j.event.Level
 import org.springframework.http.server.ServerHttpRequest
 import org.springframework.http.server.ServerHttpResponse
 import org.springframework.http.server.ServletServerHttpRequest
@@ -68,19 +69,19 @@ class SignalingHandshakeInterceptor(
         val userId = when (authResult) {
             is AuthenticationResult.Authenticated -> authResult.userId
             is AuthenticationResult.Missing -> {
-                logHandshakeRejected(connectionId, roomId.value, HandshakeResolution.UNAUTHORIZED)
+                logHandshakeRejected(connectionId, roomId.value, HandshakeResolution.UNAUTHORIZED, "Missing token")
                 reject(servletResponse, HandshakeResolution.UNAUTHORIZED, addWwwAuthenticate = true)
                 LogContext.clear()
                 return false
             }
             is AuthenticationResult.Invalid -> {
-                logHandshakeRejected(connectionId, roomId.value, HandshakeResolution.UNAUTHORIZED)
+                logHandshakeRejected(connectionId, roomId.value, HandshakeResolution.AUTH_UNAVAILABLE, "JWKS endpoint unavailable")
                 reject(servletResponse, HandshakeResolution.UNAUTHORIZED, addWwwAuthenticate = true)
                 LogContext.clear()
                 return false
             }
             is AuthenticationResult.Unavailable -> {
-                logHandshakeRejected(connectionId, roomId.value, HandshakeResolution.AUTH_UNAVAILABLE)
+                logHandshakeRejected(connectionId, roomId.value, HandshakeResolution.REDIS_UNAVAILABLE, "Redis connection failed")
                 reject(servletResponse, HandshakeResolution.AUTH_UNAVAILABLE)
                 LogContext.clear()
                 return false
@@ -159,13 +160,42 @@ class SignalingHandshakeInterceptor(
         }
     }
 
-    private fun logHandshakeRejected(connectionId: String, roomId: String?, resolution: HandshakeResolution) {
+    private fun logHandshakeRejected(
+        connectionId: String,
+        roomId: String?,
+        resolution: HandshakeResolution,
+        cause: String? = null,
+    ) {
         LogContext.set(connectionId = connectionId, roomId = roomId)
-        log.info(
-            "handshake_rejected httpStatus={} reason={}",
-            resolution.httpStatus,
-            resolution.name,
-        )
+        val level = if (resolution == HandshakeResolution.AUTH_UNAVAILABLE ||
+            resolution == HandshakeResolution.REDIS_UNAVAILABLE) {
+            Level.WARN
+        } else {
+            Level.INFO
+        }
+
+        val message = if (cause != null) {
+            "handshake_rejected httpStatus={} reason={} cause={}"
+        } else {
+            "handshake_rejected httpStatus={} reason={}"
+        }
+
+        when (level) {
+            Level.WARN -> {
+                if (cause != null) {
+                    log.warn(message, resolution.httpStatus, resolution.name, cause)
+                } else {
+                    log.warn(message, resolution.httpStatus, resolution.name)
+                }
+            }
+            else -> {
+                if (cause != null) {
+                    log.info(message, resolution.httpStatus, resolution.name, cause)
+                } else {
+                    log.info(message, resolution.httpStatus, resolution.name)
+                }
+            }
+        }
     }
 
     private fun extractRoomIdFromQuery(uri: URI): String? {

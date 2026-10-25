@@ -614,13 +614,16 @@ class ResilienceIntegrationTest {
         private val objectMapper: com.fasterxml.jackson.databind.ObjectMapper,
     ) : TextWebSocketHandler() {
         private val messages = LinkedBlockingDeque<ServerMessage>()
+        @Volatile
+        var lastParseError: Exception? = null
 
         override fun handleTextMessage(session: WebSocketSession, message: TextMessage) {
             try {
                 val serverMessage = objectMapper.readValue(message.payload, ServerMessage::class.java)
                 messages.offer(serverMessage)
+                lastParseError = null
             } catch (e: Exception) {
-
+                lastParseError = e
             }
         }
 
@@ -628,8 +631,17 @@ class ResilienceIntegrationTest {
             val deadline = System.currentTimeMillis() + unit.toMillis(timeout)
             while (System.currentTimeMillis() < deadline) {
                 val remaining = deadline - System.currentTimeMillis()
-                val message = messages.poll(remaining, TimeUnit.MILLISECONDS) ?: return null
-                if (message is ServerMessage.Answer) return message.sdp
+                val message = messages.poll(remaining, TimeUnit.MILLISECONDS)
+                if (message != null) {
+                    if (message is ServerMessage.Answer) {
+                        return message.sdp
+                    }
+                } else {
+                    if (lastParseError != null) {
+                        throw AssertionError("Timeout waiting for answer. Last parse error: ${lastParseError?.message}")
+                    }
+                    return null
+                }
             }
             return null
         }
@@ -638,8 +650,17 @@ class ResilienceIntegrationTest {
             val deadline = System.currentTimeMillis() + unit.toMillis(timeout)
             while (System.currentTimeMillis() < deadline) {
                 val remaining = deadline - System.currentTimeMillis()
-                val message = messages.poll(remaining, TimeUnit.MILLISECONDS) ?: return null
-                if (message is ServerMessage.Error) return message
+                val message = messages.poll(remaining, TimeUnit.MILLISECONDS)
+                if (message != null) {
+                    if (message is ServerMessage.Error) {
+                        return message
+                    }
+                } else {
+                    if (lastParseError != null) {
+                        throw AssertionError("Timeout waiting for error. Last parse error: ${lastParseError?.message}")
+                    }
+                    return null
+                }
             }
             return null
         }

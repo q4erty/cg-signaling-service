@@ -2,6 +2,7 @@ package com.cloudgaming.signalingservice.integration
 
 import com.cloudgaming.signalingservice.dto.ClientMessage
 import com.cloudgaming.signalingservice.dto.ServerMessage
+import com.cloudgaming.signalingservice.security.JwksStubServer
 import com.cloudgaming.signalingservice.security.JwtTestHelper
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -57,13 +58,14 @@ class WorkerIntegrationTest {
 
         private val jwtHelper = JwtTestHelper(issuer = "https://test-issuer.example.com")
         private var workerContainer: GenericContainer<*>? = null
+        private var jwksServer: JwksStubServer? = null
         private var portWasFree = false
 
         @JvmStatic
         @DynamicPropertySource
         fun properties(registry: DynamicPropertyRegistry) {
             registry.add("auth.issuer-uri") { jwtHelper.issuer }
-            registry.add("auth.jwk-set-uri") { "http://localhost:18080/.well-known/jwks.json" }
+            registry.add("auth.jwk-set-uri") { jwksServer?.jwksUri ?: "http://localhost:18080/.well-known/jwks.json" }
             registry.add("internal.secret") { "test-secret" }
         }
 
@@ -84,8 +86,15 @@ class WorkerIntegrationTest {
                 val process = ProcessBuilder("docker", "info")
                     .redirectErrorStream(true)
                     .start()
-                process.waitFor(10, TimeUnit.SECONDS)
-                true
+                val completed = process.waitFor(10, TimeUnit.SECONDS)
+                if (completed && process.exitValue() == 0) {
+                    true
+                } else {
+                    if (!completed) {
+                        process.destroyForcibly()
+                    }
+                    false
+                }
             } catch (e: Exception) {
                 false
             }
@@ -150,6 +159,7 @@ class WorkerIntegrationTest {
 
     @BeforeAll
     fun setUp() {
+        jwksServer = JwksStubServer(listOf(jwtHelper.publicKey)).also { it.start() }
         checkPreconditions()
         startWorker()
     }
@@ -157,6 +167,7 @@ class WorkerIntegrationTest {
     @AfterAll
     fun tearDown() {
         stopWorker()
+        jwksServer?.stop()
     }
 
     @Test
@@ -188,13 +199,20 @@ class WorkerIntegrationTest {
         session: WebSocketSession,
         sdpOffer: String,
     ): ServerMessage.Answer {
+        handler.lastMessage = null
+
         val offer = ClientMessage.Offer(sdp = sdpOffer)
         session.sendMessage(TextMessage(objectMapper.writeValueAsString(offer)))
 
         await().atMost(Duration.ofSeconds(30))
-            .until({ handler.lastMessage != null && handler.lastMessage is ServerMessage.Answer })
+            .until { handler.lastMessage != null }
 
-        return handler.lastMessage as ServerMessage.Answer
+        val message = handler.lastMessage
+        if (message !is ServerMessage.Answer) {
+            throw AssertionError("Expected ServerMessage.Answer, got: $message")
+        }
+
+        return message
     }
 
     private fun registerRoom(roomId: String, ownerId: String) {
@@ -206,7 +224,12 @@ class WorkerIntegrationTest {
             .header("X-Internal-Secret", "test-secret")
             .POST(HttpRequest.BodyPublishers.ofString(body))
             .build()
-        client.send(request, HttpResponse.BodyHandlers.discarding())
+
+        val response = client.send(request, HttpResponse.BodyHandlers.discarding())
+
+        if (response.statusCode() !in 200..299) {
+            throw AssertionError("Room registration failed with status ${response.statusCode()}")
+        }
     }
 
     private fun loadTestSdpOffer(): String {
