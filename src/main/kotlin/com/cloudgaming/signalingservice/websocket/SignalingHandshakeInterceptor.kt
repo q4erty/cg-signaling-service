@@ -46,100 +46,101 @@ class SignalingHandshakeInterceptor(
         wsHandler: WebSocketHandler,
         attributes: MutableMap<String, Any>,
     ): Boolean {
-        val connectionId = LogContext.generateConnectionId()
-        LogContext.set(connectionId = connectionId)
+        LogContext.set(connectionId = LogContext.generateConnectionId())
 
-        val servletRequest = (request as ServletServerHttpRequest).servletRequest
-        val servletResponse = (response as ServletServerHttpResponse).servletResponse
+        try {
+            val servletRequest = (request as ServletServerHttpRequest).servletRequest
+            val servletResponse = (response as ServletServerHttpResponse).servletResponse
 
-        val roomIdParam = extractRoomIdFromQuery(request.uri)
-        val roomIdResult = RoomId.of(roomIdParam)
-
-        if (roomIdResult.isFailure) {
-            logHandshakeRejected(connectionId, roomId = null, HandshakeResolution.INVALID_ROOM_ID)
-            reject(servletResponse, HandshakeResolution.INVALID_ROOM_ID)
-            LogContext.clear()
-            return false
-        }
-
-        val roomId = roomIdResult.getOrThrow()
-        LogContext.set(roomId = roomId.value)
-
-        val authResult = authenticator.authenticate(servletRequest)
-        val userId = when (authResult) {
-            is AuthenticationResult.Authenticated -> authResult.userId
-            is AuthenticationResult.Missing -> {
-                logHandshakeRejected(connectionId, roomId.value, HandshakeResolution.UNAUTHORIZED, "Missing token")
-                reject(servletResponse, HandshakeResolution.UNAUTHORIZED, addWwwAuthenticate = true)
-                LogContext.clear()
+            val roomIdParam = extractRoomIdFromQuery(request.uri)
+            val roomIdResult = RoomId.of(roomIdParam)
+            if (roomIdResult.isFailure) {
+                log.warn("Handshake rejected: {}", HandshakeResolution.INVALID_ROOM_ID.description)
+                reject(servletResponse, HandshakeResolution.INVALID_ROOM_ID)
                 return false
             }
-            is AuthenticationResult.Invalid -> {
-                log.info("Handshake rejected (UNAUTHORIZED) for room {}: invalid token - {}", roomId.value, authResult.reason)
-                reject(servletResponse, HandshakeResolution.UNAUTHORIZED, addWwwAuthenticate = true)
-                return false
+            val roomId = roomIdResult.getOrThrow()
+            LogContext.set(roomId = roomId.value)
+
+            val authResult = authenticator.authenticate(servletRequest)
+            val userId = when (authResult) {
+                is AuthenticationResult.Authenticated -> authResult.userId
+                is AuthenticationResult.Missing -> {
+                    log.info("Handshake rejected (UNAUTHORIZED) for room {}: missing token", roomId.value)
+                    reject(servletResponse, HandshakeResolution.UNAUTHORIZED, addWwwAuthenticate = true)
+                    return false
+                }
+                is AuthenticationResult.Invalid -> {
+                    log.info("Handshake rejected (UNAUTHORIZED) for room {}: invalid token - {}", roomId.value, authResult.reason)
+                    reject(servletResponse, HandshakeResolution.UNAUTHORIZED, addWwwAuthenticate = true)
+                    return false
+                }
+                is AuthenticationResult.Unavailable -> {
+                    log.error(
+                        "Handshake rejected (AUTH_UNAVAILABLE) for room {}: auth service unavailable",
+                        roomId.value,
+                        authResult.cause,
+                    )
+                    reject(servletResponse, HandshakeResolution.AUTH_UNAVAILABLE)
+                    return false
+                }
             }
-            is AuthenticationResult.Unavailable -> {
-                log.error(
-                    "Handshake rejected (AUTH_UNAVAILABLE) for room {}: auth service unavailable",
+            LogContext.set(userId = userId)
+
+            val resolution = roomRegistry.resolve(roomId)
+            val room = when (resolution) {
+                is RoomResolutionResult.Found -> resolution.room
+                is RoomResolutionResult.NotFound -> {
+                    log.info("Handshake rejected: room {} not found", roomId.value)
+                    reject(servletResponse, HandshakeResolution.ROOM_NOT_FOUND)
+                    return false
+                }
+                is RoomResolutionResult.Malformed -> {
+                    log.error(
+                        "Handshake rejected for room {}: malformed data - {}",
+                        roomId.value,
+                        resolution.reason,
+                    )
+                    reject(servletResponse, HandshakeResolution.ROOM_MALFORMED)
+                    return false
+                }
+                is RoomResolutionResult.Unavailable -> {
+                    log.error(
+                        "Handshake rejected for room {}: Redis unavailable",
+                        roomId.value,
+                        resolution.cause,
+                    )
+                    reject(servletResponse, HandshakeResolution.REDIS_UNAVAILABLE)
+                    return false
+                }
+            }
+
+            if (room.status != RoomStatus.ACTIVE) {
+                log.info(
+                    "Handshake rejected for room {}: status is {}",
                     roomId.value,
-                    authResult.cause,
+                    room.status,
                 )
-                reject(servletResponse, HandshakeResolution.AUTH_UNAVAILABLE)
+                reject(servletResponse, HandshakeResolution.ROOM_NOT_ACTIVE)
                 return false
             }
-        }
 
-        LogContext.set(userId = userId)
+            if (room.ownerId != userId) {
+                log.info("Handshake rejected for room {}: user {} is not the owner", roomId.value, userId)
+                reject(servletResponse, HandshakeResolution.FORBIDDEN)
+                return false
+            }
 
-        val resolution = roomRegistry.resolve(roomId)
-        val room = when (resolution) {
-            is RoomResolutionResult.Found -> resolution.room
-            is RoomResolutionResult.NotFound -> {
-                logHandshakeRejected(connectionId, roomId.value, HandshakeResolution.ROOM_NOT_FOUND)
-                reject(servletResponse, HandshakeResolution.ROOM_NOT_FOUND)
-                LogContext.clear()
-                return false
-            }
-            is RoomResolutionResult.Malformed -> {
-                logHandshakeRejected(connectionId, roomId.value, HandshakeResolution.ROOM_MALFORMED)
-                reject(servletResponse, HandshakeResolution.ROOM_MALFORMED)
-                LogContext.clear()
-                return false
-            }
-            is RoomResolutionResult.Unavailable -> {
-                logHandshakeRejected(connectionId, roomId.value, HandshakeResolution.REDIS_UNAVAILABLE)
-                reject(servletResponse, HandshakeResolution.REDIS_UNAVAILABLE)
-                LogContext.clear()
-                return false
-            }
-        }
+            attributes[ATTR_ROOM_ID] = roomId.value
+            attributes[ATTR_WORKER_BASE_URL] = room.workerBaseUrl()
+            attributes[ATTR_USER_ID] = userId
 
-        if (room.status != RoomStatus.ACTIVE) {
-            logHandshakeRejected(connectionId, roomId.value, HandshakeResolution.ROOM_NOT_ACTIVE)
-            reject(servletResponse, HandshakeResolution.ROOM_NOT_ACTIVE)
+            log.info("Handshake successful for room {} (user={})", roomId.value, userId)
+
+            return true
+        } finally {
             LogContext.clear()
-            return false
         }
-
-        if (room.ownerId != userId) {
-            logHandshakeRejected(connectionId, roomId.value, HandshakeResolution.FORBIDDEN)
-            reject(servletResponse, HandshakeResolution.FORBIDDEN)
-            LogContext.clear()
-            return false
-        }
-
-        val workerBaseUrl = room.workerBaseUrl()
-        LogContext.set(worker = workerBaseUrl)
-
-        attributes[ATTR_ROOM_ID] = roomId.value
-        attributes[ATTR_WORKER_BASE_URL] = workerBaseUrl
-        attributes[ATTR_USER_ID] = userId
-        attributes[ATTR_CONNECTION_ID] = connectionId
-
-        log.info("room_resolved worker={}", workerBaseUrl)
-
-        return true
     }
 
     override fun afterHandshake(
