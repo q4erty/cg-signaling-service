@@ -1,16 +1,14 @@
 package com.cloudgaming.signalingservice.websocket
 
-import com.cloudgaming.signalingservice.observability.LogContext
 import com.cloudgaming.signalingservice.model.RoomId
-import com.cloudgaming.signalingservice.model.RoomStatus
-import com.cloudgaming.signalingservice.repository.RoomRegistry
 import com.cloudgaming.signalingservice.model.RoomResolutionResult
+import com.cloudgaming.signalingservice.model.RoomStatus
+import com.cloudgaming.signalingservice.observability.LogContext
+import com.cloudgaming.signalingservice.repository.RoomRegistry
 import com.cloudgaming.signalingservice.security.AuthenticationResult
 import com.cloudgaming.signalingservice.security.HandshakeAuthenticator
-import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
 import org.slf4j.LoggerFactory
-import org.slf4j.event.Level
 import org.springframework.http.server.ServerHttpRequest
 import org.springframework.http.server.ServerHttpResponse
 import org.springframework.http.server.ServletServerHttpRequest
@@ -35,6 +33,7 @@ class SignalingHandshakeInterceptor(
         const val ATTR_WORKER_BASE_URL = "workerBaseUrl"
         const val ATTR_USER_ID = "userId"
         const val ATTR_CONNECTION_ID = "connectionId"
+
         private const val QUERY_PARAM_ROOM_ID = "room_id"
         private const val WWW_AUTHENTICATE_HEADER = "WWW-Authenticate"
         private const val BEARER_CHALLENGE = "Bearer"
@@ -46,12 +45,14 @@ class SignalingHandshakeInterceptor(
         wsHandler: WebSocketHandler,
         attributes: MutableMap<String, Any>,
     ): Boolean {
-        LogContext.set(connectionId = LogContext.generateConnectionId())
+        val connectionId = LogContext.generateConnectionId()
+        LogContext.set(connectionId = connectionId)
 
         try {
             val servletRequest = (request as ServletServerHttpRequest).servletRequest
             val servletResponse = (response as ServletServerHttpResponse).servletResponse
 
+            // Шаг 1: валидация room_id
             val roomIdParam = extractRoomIdFromQuery(request.uri)
             val roomIdResult = RoomId.of(roomIdParam)
             if (roomIdResult.isFailure) {
@@ -62,6 +63,7 @@ class SignalingHandshakeInterceptor(
             val roomId = roomIdResult.getOrThrow()
             LogContext.set(roomId = roomId.value)
 
+            // Шаг 2: аутентификация
             val authResult = authenticator.authenticate(servletRequest)
             val userId = when (authResult) {
                 is AuthenticationResult.Authenticated -> authResult.userId
@@ -131,6 +133,7 @@ class SignalingHandshakeInterceptor(
                 return false
             }
 
+            attributes[ATTR_CONNECTION_ID] = connectionId
             attributes[ATTR_ROOM_ID] = roomId.value
             attributes[ATTR_WORKER_BASE_URL] = room.workerBaseUrl()
             attributes[ATTR_USER_ID] = userId
@@ -149,7 +152,7 @@ class SignalingHandshakeInterceptor(
         wsHandler: WebSocketHandler,
         exception: Exception?,
     ) {
-        LogContext.clear()
+
     }
 
     private fun reject(
@@ -160,44 +163,6 @@ class SignalingHandshakeInterceptor(
         response.status = resolution.httpStatus
         if (addWwwAuthenticate) {
             response.setHeader(WWW_AUTHENTICATE_HEADER, BEARER_CHALLENGE)
-        }
-    }
-
-    private fun logHandshakeRejected(
-        connectionId: String,
-        roomId: String?,
-        resolution: HandshakeResolution,
-        cause: String? = null,
-    ) {
-        LogContext.set(connectionId = connectionId, roomId = roomId)
-        val level = if (resolution == HandshakeResolution.AUTH_UNAVAILABLE ||
-            resolution == HandshakeResolution.REDIS_UNAVAILABLE) {
-            Level.WARN
-        } else {
-            Level.INFO
-        }
-
-        val message = if (cause != null) {
-            "handshake_rejected httpStatus={} reason={} cause={}"
-        } else {
-            "handshake_rejected httpStatus={} reason={}"
-        }
-
-        when (level) {
-            Level.WARN -> {
-                if (cause != null) {
-                    log.warn(message, resolution.httpStatus, resolution.name, cause)
-                } else {
-                    log.warn(message, resolution.httpStatus, resolution.name)
-                }
-            }
-            else -> {
-                if (cause != null) {
-                    log.info(message, resolution.httpStatus, resolution.name, cause)
-                } else {
-                    log.info(message, resolution.httpStatus, resolution.name)
-                }
-            }
         }
     }
 
