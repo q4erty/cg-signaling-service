@@ -9,13 +9,7 @@ import org.springframework.security.config.http.SessionCreationPolicy
 import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator
 import org.springframework.security.oauth2.core.OAuth2TokenValidator
 import org.springframework.security.oauth2.jose.jws.SignatureAlgorithm
-import org.springframework.security.oauth2.jwt.Jwt
-import org.springframework.security.oauth2.jwt.JwtClaimNames
-import org.springframework.security.oauth2.jwt.JwtClaimValidator
-import org.springframework.security.oauth2.jwt.JwtDecoder
-import org.springframework.security.oauth2.jwt.JwtTimestampValidator
-import org.springframework.security.oauth2.jwt.JwtValidators
-import org.springframework.security.oauth2.jwt.NimbusJwtDecoder
+import org.springframework.security.oauth2.jwt.*
 import org.springframework.security.web.SecurityFilterChain
 
 @Configuration
@@ -33,7 +27,8 @@ class SecurityConfig(
                 auth
                     .requestMatchers("/api/v1/signaling/**").permitAll()
                     .requestMatchers("/internal/**").permitAll()
-                    .requestMatchers("/actuator/health").permitAll()
+                    .requestMatchers("/actuator/health", "/actuator/prometheus").permitAll()
+                    .requestMatchers("/actuator/**").denyAll()
                     .anyRequest().denyAll()
             }
             .oauth2ResourceServer { it.disable() }
@@ -70,12 +65,11 @@ class SecurityConfig(
         val audience = authProperties.audienceOrNull
         if (audience != null) {
             validators.add(JwtClaimValidator<List<String>>(JwtClaimNames.AUD) { audList ->
-                audList != null && audience in audList
+                audience in audList
             })
         }
 
         decoder.setJwtValidator(DelegatingOAuth2TokenValidator(validators))
-
         return decoder
     }
 }

@@ -9,6 +9,15 @@ spring:
 server:
   port: ${SERVER_PORT:8080}
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      show-details: never
+
 websocket:
   allowed-origins: ${WEBSOCKET_ALLOWED_ORIGINS:http://localhost:3000}
   idle-timeout: ${WEBSOCKET_IDLE_TIMEOUT:30s}
@@ -35,6 +44,9 @@ internal:
   secret: ${INTERNAL_SECRET:}
 
 logging:
+  structured:
+    format:
+      console: ecs
   level:
     com.cloudgaming.signalingservice: ${LOG_LEVEL:INFO}
     org.springframework.web.socket: ${LOG_LEVEL_WEBSOCKET:INFO}
